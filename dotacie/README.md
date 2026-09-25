@@ -25,6 +25,18 @@ obsahuje **116 výziev**: 105 z pôvodného zoznamu a 11 doplnkov z webu, ktoré
 | NZÚ HOUSEnerg – bytové domy A, C, D | 30. 6. 2028 |
 | OP Doprava 46. a 47. výzva (dobíjanie), OPZ+ 92. výzva (detské skupiny) | očakávané |
 
+## Nové výzvy pre web (grantove-poradenstvi.cz)
+
+[`nove_vyzvy_web.html`](nove_vyzvy_web.html) obsahuje 11 výziev, ktoré v pôvodnom zozname chýbali. Sú v češtine
+a v rovnakom formáte (popis + tabuľka Typ financování / Alokace / Status / Uzávěrka):
+
+* **sekcia A (7 výziev)** – dá sa zverejniť: OP TAK Technologie pro MAS II, Kraj Vysočina – podnikateľské vouchery,
+  Modernizačný fond (TRANSCom, lokomotívy, agrofotovoltika, TRANSGov), OP ST Transformačný úver;
+* **sekcia B (4 výzvy)** – pred zverejnením overiť u poskytovateľa: IROP 10. a 120. výzva, NRB Nové úspory energie,
+  SZIF kolo 1.–22. 10. 2026.
+
+Vloženie do Odoo: stránka s výzvami → Upraviť → HTML/kód → vložiť obsah súboru → Uložiť → Zverejniť.
+
 ## Upozornenia
 
 * Údaje z pôvodného zoznamu nie sú overené u poskytovateľov.
