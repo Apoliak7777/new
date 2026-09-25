@@ -73,6 +73,9 @@ Header keys (all optional):
 | E101 | save | Forbidden opcode: `import`, `obj.attr = x`, `del d[k]`, `assert` (before Python 3.14), `with`, `class`, closures (an inner function/lambda using the outer function's variables), `a, *b = x`, `global`, `:=` in a top-level comprehension, `yield from`, `match` with sequence/mapping/class patterns, annotated assignments. |
 | E102 | save | Forbidden name: any name or attribute containing `__` (also `my__var`), `mro`, `f_globals`, …, and a docstring as the first statement (`__doc__`). String literals are fine. |
 | E201 | runtime | Name not in the context or builtins: `type`, `getattr`, `hasattr`, `print`, `dir`, `ValueError`, `KeyError`, … |
+| E203 | runtime | Field renamed between versions, e.g. `res.users.groups_id` → `group_ids` (saas-18.2+), `sale.order.line.tax_id` → `tax_ids`. |
+| W203 | runtime | Field that another Odoo version has but the target's Community does not (removed, or moved to Enterprise). |
+| W205 | runtime | Model that another Odoo version has but the target's Community does not. |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
 | W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
 | W220 | future | saas-19.3+/20.0 with the default `--unsafe-policy=log`: the same constructs are only logged, but rejected once the server switches to `raise`. |
@@ -86,6 +89,17 @@ Header keys (all optional):
 
 Suppress on one line with `# sevlint: disable=W302` (or bare `# sevlint: disable`), for a whole
 file with the header `disable=`, for a run with `--disable W302,W303`, or all warnings with `--disable W*`.
+
+## Fields across versions
+
+A field index of every Odoo Community model in all 16 supported versions ships with sevlint
+(`tools/fields_index.py` builds it from the Odoo sources, 130 KiB). Where the model of an
+expression is obvious (`env['res.users']`, `user`, `env.company`, `record`/`records` of an action
+whose `model_id` is known, names assigned from those, loop variables), field names in attribute
+access, `write`/`create` values, domains, `mapped`/`filtered`/`read` strings are checked against
+the target version. Only names Odoo had in *some* version are judged, so Enterprise, Studio (`x_`)
+and custom fields are never reported. Set the model of a `.py` snippet with the header key
+`model=res.partner`.
 
 ## Python version matters
 

@@ -28,6 +28,7 @@ class Snippet:
     disabled: frozenset[str] = frozenset()
     binding: str | None = None  # binding_view_types when offered in the Action menu, e.g. "list,form"
     save_time_only: bool = False  # state is not 'code': Odoo still validates the code on save
+    model: str | None = None  # the action's model (record/records/model), when known
     # findings about the XML itself: (file line, code, severity, message)
     source_findings: list[tuple[int, str, str, str]] = field(default_factory=list)
 
@@ -40,6 +41,7 @@ class Header:
     names: frozenset[str] = frozenset()
     disabled: frozenset[str] = frozenset()
     binding: str | None = None
+    model: str | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -84,6 +86,8 @@ def parse_header(text: str) -> Header | None:
                 header.disabled |= _split_list(value)
             elif key == "binding":
                 header.binding = value
+            elif key == "model":
+                header.model = value
             else:
                 header.errors.append(f"unknown header key {key!r}")
     return header
@@ -100,7 +104,7 @@ def read_python(path: str, text: str, *, require_header: bool) -> tuple[list[Sni
         caller=header.caller,
         odoo_version=header.odoo,
         modules=header.modules, names=header.names, disabled=header.disabled,
-        binding=header.binding,
+        binding=header.binding, model=header.model,
     )
     return [snippet], header.errors
 
@@ -306,7 +310,22 @@ def _finish_record(path: str, record: _Record, snippets: list[Snippet], problems
         binding=_binding(fields),
         save_time_only=not runs,
         source_findings=source_findings,
+        model=_action_model(record),
     ))
+
+
+def _action_model(record: _Record) -> str | None:
+    """The model from ``model_id`` (a ref such as base.model_res_partner), or the parent
+    automation rule's for actions nested in action_server_ids."""
+    from .fields import model_from_xmlid  # the index loads lazily, only when needed
+
+    for rec in (record, record.parent[0] if record.parent else None):
+        if rec is None:
+            continue
+        value = _value(rec.fields.get("model_id"))
+        if isinstance(value, str) and value:
+            return model_from_xmlid(value)
+    return None
 
 
 def _binding(fields: dict[str, _Field]) -> str | None:

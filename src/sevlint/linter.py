@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import engine, profile as profiles, rules, sources
+from . import engine, fields, profile as profiles, rules, sources
 
 INLINE_DISABLE_RE = re.compile(r"#\s*sevlint:\s*disable(?:=(?P<codes>[\w,]+))?")
 DEFAULT_VERSION = "19.0"
@@ -81,7 +81,8 @@ def _list_bound(binding: str | None, version: str) -> bool:
 def lint_code(code: str, version: str, caller: str = "server_action", *,
               modules: frozenset[str] = frozenset(), names: frozenset[str] = frozenset(),
               disabled: frozenset[str] = frozenset(), binding: str | None = None,
-              runtime_checks: bool = True, unsafe_policy: str | None = None) -> list[engine.Diagnostic]:
+              runtime_checks: bool = True, unsafe_policy: str | None = None,
+              model: str | None = None) -> list[engine.Diagnostic]:
     """Lint one piece of server action code; lines are relative to ``code``.
 
     ``binding`` is the action's binding_view_types when it is offered in the Action menu
@@ -100,6 +101,7 @@ def lint_code(code: str, version: str, caller: str = "server_action", *,
                 defined = engine.defined_toplevel_names(analysis.code)
                 diags += rules.run_rules(analysis.tree, analysis.code, caller, defined,
                                          list_bound=_list_bound(binding, version), version=version)
+                diags += fields.check_fields(analysis.tree, version, model)
     except (engine.TooComplex, RecursionError, MemoryError) as err:
         diags = [engine.Diagnostic(1, "E001", f"{type(err).__name__}: code too long or too deeply nested for "
                                               f"Python's compiler; Odoo's check fails the same way "
@@ -129,7 +131,8 @@ def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str)
                       disabled=disabled,
                       binding=snippet.binding,
                       runtime_checks=not snippet.save_time_only,
-                      unsafe_policy=opts.unsafe_policy)
+                      unsafe_policy=opts.unsafe_policy,
+                      model=snippet.model)
     findings = [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
                         version, caller, snippet.label) for d in diags]
     for line, code, severity, message in snippet.source_findings:

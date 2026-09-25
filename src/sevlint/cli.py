@@ -28,6 +28,13 @@ RULES = {
             "Common cases: type, getattr, hasattr, print, ValueError, KeyError.",
     "E202": "Attribute not exposed by a wrapped module (datetime, dateutil, time). "
             "AttributeError at runtime, e.g. time.mktime or dateutil.easter.",
+    "E203": "Field renamed between Odoo versions: the model has a similarly named field that appeared when this "
+            "one disappeared (res.users groups_id -> group_ids in saas-18.2+, sale.order.line tax_id -> tax_ids). "
+            "Checked where the model is known: env['model'], user, env.user/company, record/records with the "
+            "action's model_id, and names assigned from those.",
+    "W203": "Field not in the target version's Odoo Community (it is in another version) and no obvious rename: "
+            "removed, or moved to an Enterprise/custom module.",
+    "W205": "Model not in the target version's Odoo Community (it is in another version).",
     "W100": "XML: text after a comment or child element inside <field name=\"code\"> is dropped by Odoo "
             "(it stores node.text only).",
     "W210": "Name provided only by an addon (json: base_automation/website, request: website, "

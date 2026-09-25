@@ -27,6 +27,8 @@ jobs:
         run: |
           pip wheel . --no-deps -w dist
           python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-19.0.json'
+          python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-saas-19.2.json'
+          python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/fields.json.gz'
       - name: Examples produce the expected findings
         run: |
           rc=0
