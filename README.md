@@ -47,7 +47,7 @@ Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input),
 
 | Input | How |
 | --- | --- |
-| `*.xml` module data | Every `<record>` of `ir.actions.server`, `ir.cron`, `base.automation` with a `code` field, including records nested in `action_server_ids`. `eval="'...'"` values are understood. The code is read the way Odoo stores it (text before the first comment/child element; the last `code` field wins). If `state` is not `code`, only the save-time checks run: Odoo validates the code of every action anyway. |
+| `*.xml` module data | Every `<record>` of `ir.actions.server`, `ir.cron`, `base.automation` with a `code` field, including records nested in `action_server_ids`. `eval="'...'"` and `file="module/path.py"` values are understood, as are the declared encoding (UTF-8, UTF-16, Shift_JIS, ...). The code is read the way Odoo stores it (text before the first comment; the last `code` field wins). If the action's `state` is not `code` (a server action without `state` never runs code: 17/18 default to `object_write`), only the save-time checks run: Odoo validates the code of every action anyway. |
 | `*.py` with a header | Files whose leading comment block (first 10 lines) contains `# sevlint: ...`. Other `.py` files are ignored unless you pass `--all-py`. |
 | stdin | `sevlint check -` (the header is optional) |
 
@@ -66,12 +66,13 @@ Header keys (all optional):
 | Code | When it hurts | What |
 | --- | --- | --- |
 | E001 | save | Syntax error, or code too long/deep for the compiler. `strip()` removes only the first line's indentation, so an indented block is an `IndentationError`. |
+| E003 | install | XML: a child element inside `<field name="code">`; Odoo's `import_xml.rng` allows only text, so the module does not install. |
 | E101 | save | Forbidden opcode: `import`, `obj.attr = x`, `del d[k]`, `assert` (before Python 3.14), `with`, `class`, closures (an inner function/lambda using the outer function's variables), `a, *b = x`, `global`, `:=` in a top-level comprehension, `yield from`, `match` with sequence/mapping/class patterns, annotated assignments. |
 | E102 | save | Forbidden name: any name or attribute containing `__` (also `my__var`), `mro`, `f_globals`, …, and a docstring as the first statement (`__doc__`). String literals are fine. |
 | E201 | runtime | Name not in the context or builtins: `type`, `getattr`, `hasattr`, `print`, `dir`, `ValueError`, `KeyError`, … |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
 | W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
-| W210 | runtime | `json` needs `base_automation` or `website`, `request` needs `website`, `payload` needs `base_automation` and an HTTP request (never in scheduled runs). |
+| W210 | runtime | `json` needs `base_automation` or `website`, `request` needs `website` (and is unbound in scheduled actions), `payload` needs `base_automation` and an HTTP request (never in scheduled runs). |
 | W301 | data | `env.cr.commit()` / `rollback()` (also via `cr = env.cr`). Commits inside a batch loop of a scheduled action are fine. |
 | W302 | performance | `search`/`search_count`/`read_group`/… per iteration: in loops, in lambdas given to `filtered`/`mapped`/`sorted`, or in a helper called from a loop. `search(..., limit=N)` batches in a `while` loop are fine. |
 | W303 | data | `raise UserError` after `write`/`create`/`unlink`/… on the same path: everything is rolled back. |
@@ -129,8 +130,9 @@ repos:
 
 ```yaml
 - uses: actions/setup-python@v7
-  with: {python-version: "3.12"}
-- run: pipx run --spec git+https://github.com/Apoliak7777/new sevlint check . --format github
+  with: {python-version: "3.12"}   # the Python your Odoo server runs
+- run: pip install git+https://github.com/Apoliak7777/new
+- run: sevlint check . --format github
 ```
 
 ### Claude Code plugin
@@ -146,11 +148,15 @@ and fixes the code), and a skill tells Claude the rules of server action code up
 
 To try a local checkout without installing: `claude --plugin-dir path/to/this/repo`.
 
-The hook runs from the plugin directory with no install and no network. `hooks/run.sh` picks the
-first working Python 3.10+ among `$SEVLINT_PYTHON`, `python3`, `python`, `py` (so the Windows Store
-`python3` alias is skipped). On Windows it needs Git Bash, which Claude Code uses for hook commands.
-Set `SEVLINT_PYTHON` to use the same Python version as your Odoo server. The hook stays silent for
-files without server action code.
+The hook runs from the plugin directory with no install and no network. `hooks/run.sh` uses
+`$SEVLINT_PYTHON` if set, else the first working Python 3.10+ among `python3`, `python`, `py` (so the
+Windows Store `python3` alias is skipped). On Windows it needs Git Bash, which Claude Code uses for
+hook commands. Set `SEVLINT_PYTHON` to the same Python version as your Odoo server.
+
+The hook stays silent for files without server action code, for Odoo 16.0 and older modules and for
+XML that is not Odoo data. Findings go to Claude with the rule explanations inline; a mismatch with
+`target-python` on an otherwise clean file is shown to you instead. On Python 3.10 without `tomli`
+the project config is ignored (with a note).
 
 ## How it stays correct
 

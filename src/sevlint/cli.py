@@ -14,6 +14,8 @@ RULES = {
     "E001": "Syntax error (or code too long/deep for the compiler). Odoo compiles `code.strip()` in exec "
             "mode: strip() removes only the first line's indentation, so an indented block is an "
             "IndentationError. Rejected when saving.",
+    "E003": "XML: child element inside <field name=\"code\">. Odoo's import_xml.rng allows only text there, "
+            "so the module fails to install.",
     "E101": "Forbidden opcode. The construct compiles to bytecode outside Odoo's _SAFE_OPCODES "
             "(import, `obj.attr = x`, `del d[k]`, assert, with, class, closures, a, *b = ...). "
             "Depends on the Python version Odoo runs on. Rejected when saving.",
@@ -28,7 +30,7 @@ RULES = {
             "(it stores node.text only).",
     "W210": "Name provided only by an addon (json: base_automation/website, request: website, "
             "payload: base_automation + an HTTP request, never in scheduled runs). Declare installed modules "
-            "with --modules or config.",
+            "with --modules or config. `request` in a scheduled action is an unbound proxy.",
     "W301": "env.cr.commit()/rollback() inside a server action: breaks atomicity of the action. "
             "Commits inside a loop of a scheduled action (batching) are not reported.",
     "W302": "ORM query method (search, search_count, read_group, ...) inside a loop, a per-record lambda "
@@ -132,51 +134,64 @@ def _python_notes(report: Report, target: str | None) -> list[str]:
 
 
 class _Configs:
-    """Nearest config for each linted path (like the Claude hook), loaded once."""
+    """Nearest config for each linted file (like pre-commit and the Claude hook), loaded once."""
 
-    def __init__(self, explicit: Path | None):
-        self.explicit = explicit
-        self.cache: dict[Path, dict] = {}
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.loaded: dict[Path | None, dict] = {}
+        self.options: dict[Path | None, Options] = {}
 
-    def for_path(self, path: Path) -> tuple[Path | None, dict]:
-        found = self.explicit or config.find(path)
-        if found is None:
-            return None, {}
-        if found not in self.cache:
-            self.cache[found] = config.load(found)
-        return found, self.cache[found]
+    def config_for(self, path: Path) -> Path | None:
+        return self.args.config or config.find(path)
+
+    def options_for(self, path: Path) -> Options:
+        found = self.config_for(path.absolute())
+        if found not in self.options:
+            cfg = config.load(found) if found is not None else {}
+            self.loaded[found] = cfg
+            self.options[found] = _checked_options(self.args, cfg)
+        return self.options[found]
+
+    @property
+    def targets(self) -> set[str]:
+        return {cfg["target-python"] for cfg in self.loaded.values() if cfg.get("target-python")}
+
+
+def _read_stdin() -> str:
+    # Bytes, decoded as UTF-8: on Windows a piped stdin would otherwise be decoded as cp1252.
+    return sys.stdin.buffer.read().decode("utf-8-sig", errors="replace")
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    configs = _Configs(args.config)
-    report = Report()
-    targets: set[str] = set()
+    configs = _Configs(args)
+    if "-" in args.paths and len(args.paths) > 1:
+        print("sevlint: '-' (stdin) cannot be combined with paths", file=sys.stderr)
+        return 2
     try:
         if args.odoo:
             profiles.load(args.odoo)  # fail fast on a bad --odoo
         if args.paths == ["-"]:
-            _, cfg = configs.for_path(Path.cwd())
-            opts = _checked_options(args, cfg)
-            targets.add(cfg.get("target-python", ""))
-            report = lint_text(sys.stdin.read(), "<stdin>", opts)
+            report = lint_text(_read_stdin(), "<stdin>", configs.options_for(Path.cwd() / "-"))
         else:
-            for raw in args.paths:
-                _, cfg = configs.for_path(Path(raw).absolute())
-                targets.add(cfg.get("target-python", ""))
-                report.merge(lint_paths([raw], _checked_options(args, cfg)))
+            report = lint_paths(args.paths, Options(), options_for=configs.options_for)
     except (config.ConfigError, OSError, ValueError) as err:
         print(f"sevlint: {err}", file=sys.stderr)
         return 2
     output = render(report, args.format)
     if output:
         print(output)
-    target = args.target_python or next((t for t in sorted(targets) if t), None)
-    for line in report.problems + report.notes + _python_notes(report, target):
+    running = "%d.%d" % sys.version_info[:2]
+    targets = {args.target_python} if args.target_python else configs.targets
+    wrong = sorted(t for t in targets if t != running)
+    notes = _python_notes(report, wrong[0] if wrong else None)
+    if len(wrong) > 1:
+        notes.append(f"error: the linted paths need different Pythons ({', '.join(sorted(targets))}); run them separately")
+    for line in report.problems + report.notes + notes:
         print(f"sevlint: {line}", file=sys.stderr)
     if args.format == "text":
         print(f"sevlint: {report.errors} error(s), {report.warnings} warning(s) in {report.snippets} snippet(s) "
               f"from {report.files} file(s)", file=sys.stderr)
-    if target and target != "%d.%d" % sys.version_info[:2]:
+    if wrong:
         return 2
     if report.errors or (args.strict and report.warnings) or report.problems:
         return 1

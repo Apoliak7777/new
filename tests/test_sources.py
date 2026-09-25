@@ -1,4 +1,5 @@
 import textwrap
+from pathlib import Path
 
 from sevlint import sources
 from sevlint.linter import Options, lint_paths
@@ -23,19 +24,23 @@ XML = textwrap.dedent("""\
     ]]></field>
         </record>
         <record id="action_entities" model="ir.actions.server">
+            <field name="state">code</field>
             <field name="code">x = 1 &lt; 2 and records
     y = missing_name</field>
         </record>
         <record id="action_bound_list" model="ir.actions.server">
+            <field name="state">code</field>
             <field name="binding_model_id" ref="base.model_res_partner"/>
             <field name="code">action = record.open()</field>
         </record>
         <record id="action_bound_form" model="ir.actions.server">
+            <field name="state">code</field>
             <field name="binding_model_id" ref="base.model_res_partner"/>
             <field name="binding_view_types">form</field>
             <field name="code">action = record.open()</field>
         </record>
         <record id="action_automation" model="ir.actions.server">
+            <field name="state">code</field>
             <field name="base_automation_id" ref="rule_1"/>
             <field name="code">x = records</field>
         </record>
@@ -180,11 +185,12 @@ def test_eval_attributes():
     </record>
 </odoo>"""
     snippets = _snippets(xml)
+    # no state on ir.actions.server: 17/18 default to object_write, 19 has no default -> code never runs
     assert [(s.label, s.code, s.save_time_only, s.binding) for s in snippets] == [
         ("c", "model._run()", False, None),
         ("s", "x = 1", True, None),
-        ("u", "x = record", False, None),
-        ("v", "x = record", False, "form"),
+        ("u", "x = record", True, None),
+        ("v", "x = record", True, "form"),
     ]
 
 
@@ -197,7 +203,7 @@ import os</field>
     </record>
 </odoo>"""
     (snippet,) = _snippets(xml)
-    assert "import os" not in snippet.code and snippet.truncated_at == 5
+    assert "import os" not in snippet.code and [f[:2] for f in snippet.source_findings] == [(5, "W100")]
     path = tmp_path / "a.xml"
     path.write_text(xml)
     assert [(f.line, f.code) for f in lint_paths([str(path)], Options()).findings] == [(5, "W100")]
@@ -259,3 +265,63 @@ def test_unreadable_file_is_a_problem(tmp_path, monkeypatch):
     monkeypatch.setattr(type(path), "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError(13, "denied")))
     report = lint_paths([str(path)], Options())
     assert report.problems and "cannot read" in report.problems[0]
+
+
+def test_all_code_after_leading_comment(tmp_path):
+    path = tmp_path / "a.xml"
+    path.write_text('<odoo><record id="a" model="ir.actions.server"><field name="state">code</field>\n'
+                    '<field name="code">\n    <!-- archive -->\nrecords.write({"active": False})\n</field></record></odoo>')
+    assert [(f.line, f.code) for f in lint_paths([str(path)], Options()).findings] == [(4, "W100")]
+
+
+def test_w100_inline_suppression(tmp_path):
+    path = tmp_path / "a.xml"
+    path.write_text('<odoo><record id="a" model="ir.actions.server"><field name="code">x = 1\n<!-- c -->\n'
+                    'y = 2  # sevlint: disable=W100\n</field></record></odoo>')
+    assert lint_paths([str(path)], Options()).findings == []
+
+
+def test_child_element_in_code_field_is_an_error(tmp_path):
+    path = tmp_path / "a.xml"
+    path.write_text('<odoo><record id="a" model="ir.actions.server"><field name="code">x = 1\n<span/>\n'
+                    'import os\n</field></record></odoo>')
+    assert [(f.line, f.code) for f in lint_paths([str(path)], Options()).findings] == [(2, "E003")]
+
+
+def test_encodings(tmp_path):
+    body = '<odoo><record id="a" model="ir.actions.server"><field name="name">{}</field>' \
+           '<field name="state">code</field><field name="code">import os</field></record></odoo>'
+    cases = {"sjis.xml": ('<?xml version="1.0" encoding="Shift_JIS"?>\n' + body.format("日本")).encode("shift_jis"),
+             "utf8.xml": ('<?xml version="1.0" encoding="utf8"?>\n' + body.format("Café")).encode("utf-8"),
+             "u16.xml": ('<?xml version="1.0" encoding="UTF-16"?>\n' + body.format("č")).encode("utf-16"),
+             "latin.xml": ('<?xml version="1.0" encoding="ISO-8859-2"?>\n' + body.format("č")).encode("iso-8859-2")}
+    for name, data in cases.items():
+        (tmp_path / name).write_bytes(data)
+    (tmp_path / "bad.xml").write_bytes(b'<?xml version="1.0" encoding="latin-9x"?>\n<odoo/>')
+    (tmp_path / "b64.xml").write_bytes(b'<?xml version="1.0" encoding="base64"?>\n<odoo/>')
+    report = lint_paths([str(tmp_path)], Options())
+    assert sorted(Path(f.path).name for f in report.findings) == sorted(cases)
+    assert len(report.problems) == 2 and all("cannot decode" in p for p in report.problems)
+
+
+def test_unhashable_eval_does_not_crash():
+    xml = '<odoo><record id="a" model="ir.actions.server"><field name="state">code</field>' \
+          '<field name="binding_model_id" ref="m"/><field name="binding_view_types" eval="{[\'list\']: 1}"/>' \
+          '<field name="code">x = 1</field></record></odoo>'
+    (snippet,) = _snippets(xml)
+    assert snippet.binding is None
+
+
+def test_code_from_file_attribute(tmp_path):
+    mod = make_module(tmp_path, "mymod", "19.0.1.0.0", [])
+    (mod / "data" / "code.py").write_text("import os\n")
+    xml = mod / "data" / "a.xml"
+    xml.write_text('<odoo><record id="a" model="ir.actions.server"><field name="state">code</field>'
+                   '<field name="code" type="char" file="mymod/data/code.py"/></record></odoo>')
+    report = lint_paths([str(xml)], Options())
+    assert [(Path(f.path).name, f.line, f.code) for f in report.findings] == [("code.py", 1, "E101")]
+
+
+def test_bare_disable_in_header_block_is_not_an_error():
+    header = sources.parse_header("# sevlint: disable\nimport os\n")
+    assert header is not None and header.errors == []

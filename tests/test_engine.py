@@ -166,3 +166,13 @@ def test_annotations_are_lazy_on_314():
         assert found == []
     else:
         assert [c for _, c in found] == ["E201", "E201"]
+
+
+def test_module_annotation_line_ignores_function_annotations():
+    code = "def compute(order):\n    total: float = 0.0\n    return total\n\nresult: dict = {}\n"
+    assert {line for line, _ in codes(code)} == {5}
+
+
+def test_hoisted_cell_of_inlined_comprehension_keeps_its_line():
+    code = "partners = records.mapped('partner_id')\ngroups = [records.filtered(lambda r: r.partner_id == p) for p in partners]\n"
+    assert {line for line, _ in codes(code)} == {2}

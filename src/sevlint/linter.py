@@ -129,11 +129,9 @@ def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str)
                       runtime_checks=not snippet.save_time_only)
     findings = [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
                         version, caller, snippet.label) for d in diags]
-    if snippet.truncated_at and "W100" not in disabled and "W*" not in disabled:
-        findings.append(Finding(snippet.path, snippet.truncated_at, "W100", "warning",
-                                "Odoo keeps only the text before the first XML comment or child element inside "
-                                "<field name=\"code\">; the code after it is silently dropped", version, caller,
-                                snippet.label))
+    for line, code, severity, message in snippet.source_findings:
+        if code not in disabled and code[0] + "*" not in disabled:
+            findings.append(Finding(snippet.path, line, code, severity, message, version, caller, snippet.label))
     return findings
 
 
@@ -172,19 +170,25 @@ def _read_snippets(path: Path, opts: Options) -> tuple[list[sources.Snippet], li
     return sources.read_python(str(path), text, require_header=not opts.all_py)
 
 
-def lint_paths(paths: list[str], opts: Options) -> Report:
+def lint_paths(paths: list[str], opts: Options, options_for=None) -> Report:
+    """Lint files and directories. ``options_for(path)`` may supply per-file options
+    (e.g. from the nearest config file); ``opts`` is used otherwise."""
     report = Report()
     files, report.notes = collect_files(paths)
     for path, explicit in files:
+        if explicit and not path.exists():
+            report.problems.append(f"{path}: no such file or directory")
+            continue
         if path.suffix not in (".py", ".xml"):
             if explicit:
                 report.notes.append(f"{path}: skipped (only .py and .xml are linted)")
             continue
         if not path.is_file():
-            report.problems.append(f"{path}: no such file")
+            report.problems.append(f"{path}: not a regular file")
             continue
+        file_opts = options_for(path) if options_for else opts
         try:
-            snippets, problems = _read_snippets(path, opts)
+            snippets, problems = _read_snippets(path, file_opts)
         except OSError as err:
             report.problems.append(f"{path}: cannot read ({err.strerror or err})")
             continue
@@ -193,11 +197,11 @@ def lint_paths(paths: list[str], opts: Options) -> Report:
             continue
         report.files += 1
         located = path.absolute()  # not resolve(): siblings of a symlinked module live next to the link
-        fallback = sources.manifest_version(located) or opts.odoo or DEFAULT_VERSION
+        fallback = sources.manifest_version(located) or file_opts.odoo or DEFAULT_VERSION
         installed = sources.manifest_modules(located)
         for snippet in snippets:
             snippet.modules |= installed
-            _lint_into(report, snippet, opts, fallback)
+            _lint_into(report, snippet, file_opts, fallback)
     return report
 
 

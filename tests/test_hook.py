@@ -60,7 +60,7 @@ def test_output_is_capped(tmp_path):
     path = tmp_path / "sa.py"
     path.write_text("# sevlint:\n" + "\n".join(f"x{i} = missing_{i}" for i in range(500)))
     code, err = run_hook(event(path))
-    assert code == 2 and len(err) < 10_000 and "more; run `sevlint check" in err
+    assert code == 2 and len(err) < 10_000 and "... and " in err
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,8 +119,61 @@ def test_launcher_without_python(tmp_path):
     assert proc.returncode == 1 and "no Python >= 3.10 found" in proc.stderr
 
 
+def test_launcher_rejects_unusable_sevlint_python(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+    (bin_dir / "python3").symlink_to(sys.executable)
+    env = {"PATH": str(bin_dir), "SEVLINT_PYTHON": "/nonexistent/python3.100"}
+    proc = subprocess.run(["/bin/sh", str(ROOT / "hooks" / "run.sh")], input="{}", capture_output=True, text=True,
+                          env=env)
+    assert proc.returncode == 1 and "SEVLINT_PYTHON" in proc.stderr
+
+
+def test_gitattributes_keeps_launcher_lf():
+    assert "*.sh text eol=lf" in (ROOT / ".gitattributes").read_text()
+
+
 def test_hooks_json_uses_launcher():
     data = json.loads((ROOT / "hooks" / "hooks.json").read_text())
     (entry,) = data["hooks"]["PostToolUse"]
     assert entry["matcher"] == "Write|Edit"
     assert entry["hooks"][0]["command"] == 'sh "${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"'
+
+
+def test_non_odoo_and_unsupported_inputs_stay_silent(tmp_path):
+    (tmp_path / "frag.xml").write_text("<item>a</item>\n<item>b</item>\n")
+    assert run_hook(event(tmp_path / "frag.xml")) == (0, "")
+    mod = tmp_path / "old_mod"
+    (mod / "data").mkdir(parents=True)
+    (mod / "__manifest__.py").write_text(repr({"name": "x", "version": "16.0.1.0.0", "depends": []}))
+    (mod / "data" / "a.xml").write_text('<odoo><record id="a" model="ir.actions.server"><field name="state">code'
+                                        '</field><field name="code">import os</field></record></odoo>')
+    assert run_hook(event(mod / "data" / "a.xml")) == (0, "")
+
+
+def test_config_is_not_read_for_files_without_server_actions(tmp_path):
+    (tmp_path / ".sevlint.toml").write_text("odoo = \n")  # broken, but irrelevant for util.py
+    (tmp_path / "util.py").write_text("def add(a, b):\n    return a + b\n")
+    assert run_hook(event(tmp_path / "util.py")) == (0, "")
+
+
+def test_target_python_mismatch_on_clean_file_goes_to_the_user(tmp_path):
+    if not config_available():
+        return
+    (tmp_path / ".sevlint.toml").write_text('target-python = "2.7"\n')
+    (tmp_path / "sa.py").write_text("# sevlint:\nx = 1\n")
+    code, err = run_hook(event(tmp_path / "sa.py"))
+    assert code == 1 and "target-python is 2.7" in err
+
+
+def test_rules_are_explained_inline(tmp_path):
+    path = tmp_path / "sa.py"
+    path.write_text("# sevlint:\nimport os\n")
+    code, err = run_hook(event(path))
+    assert code == 2 and "E101: Forbidden opcode" in err and "sevlint explain" not in err
+
+
+def config_available():
+    from sevlint import config
+    return config.tomllib is not None
