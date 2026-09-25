@@ -77,6 +77,7 @@ Header keys (all optional):
 | W203 | runtime | Field that another Odoo version has but the target's Community does not (removed, or moved to Enterprise). |
 | W205 | runtime | Model that another Odoo version has but the target's Community does not. |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
+| W110 | save | Rejected by Odoo on another Python the target version supports (comprehension closures before 3.12, `(*a, b)` before 3.12, `@` on 3.10, `assert` before 3.14, newer syntax). |
 | W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
 | W220 | future | saas-19.3+/20.0 with the default `--unsafe-policy=log`: the same constructs are only logged, but rejected once the server switches to `raise`. |
 | W210 | runtime | `json` needs `base_automation` or `website`, `request` needs `website` (and is unbound in scheduled actions), `payload` needs `base_automation` and an HTTP request (never in scheduled runs). |
@@ -113,8 +114,12 @@ sevlint compiles with the Python it runs on. These constructs flip between versi
 | `a @ b` | rejected | allowed | allowed | allowed |
 | `assert` | rejected | rejected | rejected | allowed |
 
-Run sevlint on the server's Python, e.g. `uvx --python 3.10 --from git+https://github.com/Apoliak7777/new sevlint check .`,
-and set `target-python` so a mismatch fails loudly instead of giving a wrong verdict.
+sevlint knows these differences: when the code passes on the Python it runs on but Odoo would
+reject it on another Python the target version supports, it reports **W110** with the exact
+versions (verified against Odoo's real `safe_eval` under all five Pythons in CI). For an exact
+verdict, run sevlint on the server's Python, e.g.
+`uvx --python 3.10 --from git+https://github.com/Apoliak7777/new sevlint check .`, and set
+`target-python` so a mismatch fails loudly; W110 is then silenced.
 
 ## Configuration
 

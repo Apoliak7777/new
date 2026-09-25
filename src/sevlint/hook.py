@@ -102,7 +102,7 @@ def claude_post_tool_use(stdin, stderr) -> int:
         except OSError as err:
             notes.append(f"sevlint: {cfg_path} ignored: {err}")
     no_flags = argparse.Namespace(odoo=None, caller=None, modules="", names="", disable="", all_py=False,
-                                  unsafe_policy=None)
+                                  unsafe_policy=None, target_python=None)
     try:
         report = lint_paths([str(path)], options_from(no_flags, cfg))
     except ValueError:

@@ -35,6 +35,9 @@ RULES = {
     "W203": "Field not in the target version's Odoo Community (it is in another version) and no obvious rename: "
             "removed, or moved to an Enterprise/custom module.",
     "W205": "Model not in the target version's Odoo Community (it is in another version).",
+    "W110": "The verdict depends on the Python the Odoo server runs: comprehension closures and `(*a, b)` are "
+            "rejected before 3.12, `@` on 3.10, `assert` before 3.14, newer syntax where it does not exist. Silenced "
+            "when target-python pins the server's Python (then the verdict is exact).",
     "W100": "XML: text after a comment or child element inside <field name=\"code\"> is dropped by Odoo "
             "(it stores node.text only).",
     "W210": "Name provided only by an addon (json: base_automation/website, request: website, "
@@ -100,6 +103,7 @@ def options_from(args: argparse.Namespace, cfg: dict) -> Options:
         disabled=_csv(args.disable) | frozenset(cfg.get("disable", [])),
         all_py=args.all_py,
         unsafe_policy=getattr(args, "unsafe_policy", None) or cfg.get("unsafe-policy"),
+        target_python=getattr(args, "target_python", None) or cfg.get("target-python"),
     )
 
 

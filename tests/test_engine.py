@@ -110,7 +110,7 @@ def test_comprehension_closure_rejected_before_312():
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 709 inlines comprehensions on 3.12+")
 def test_comprehension_closure_accepted_since_312():
-    assert codes("def f(n):\n    return [i * n for i in range(3)]") == []
+    assert codes("def f(n):\n    return [i * n for i in range(3)]", version="saas-19.1") == []
 
 
 def test_unknown_version():
@@ -190,3 +190,17 @@ def test_sandbox_rules_follow_the_policy():
 def test_sandbox_context_names():
     assert codes("x = BinaryBytes", version="saas-19.3") == []
     assert codes("x = BinaryBytes", version="19.0") == [(1, "E201")]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="on 3.10/3.11 the running Python rejects it (E101)")
+def test_cross_python_warning():
+    closure = "def f(n):\n    return [i * n for i in range(3)]"
+    assert codes(closure, version="19.0") == [(2, "W110")]  # 19.0 runs on 3.10-3.14
+    assert codes(closure, version="saas-19.1") == []  # 3.12+ only: no Python rejects it
+    assert lint_code(closure, "19.0", target_python="3.12") == []  # pinned: exact verdict
+    assert codes("def f(a):\n    return (*a, 1)", version="17.0") == [(2, "W110")]
+
+
+@pytest.mark.skipif(sys.version_info >= (3, 12), reason="3.12+ inlines comprehensions")
+def test_cross_python_error_on_old_python():
+    assert (2, "E101") in codes("def f(n):\n    return [i * n for i in range(3)]")
