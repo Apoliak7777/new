@@ -22,7 +22,7 @@ from .engine import Diagnostic, RUNTIME
 from .profile import normalize_version
 
 RECORDSET_METHODS = {"sudo", "with_context", "with_user", "with_company", "with_env", "browse", "search",
-                     "filtered", "filtered_domain", "sorted", "exists", "create", "copy", "new", "grouped"}
+                     "filtered", "filtered_domain", "sorted", "exists", "create", "copy", "new"}
 VALS_METHODS = {"write": 0, "create": 0, "update": 0, "new": 0}
 DOMAIN_METHODS = {"search", "search_count", "search_read", "search_fetch", "filtered_domain", "read_group",
                   "_read_group", "formatted_read_group", "web_search_read"}
@@ -32,6 +32,7 @@ MAGIC_FIELDS = frozenset({"id", "display_name", "create_uid", "create_date", "wr
 # How a name is used: `rec.name` (could be a method), a vals key of write()/create() (an override may
 # consume extra keys), or where only a field is valid (domains, rec['name'], mapped('name'), ...).
 ATTR, VALS, FIELD = "attr", "vals", "field"
+INSTALLATION_MODELS = {"ir.module.module", "ir.model", "ir.model.fields"}  # `if` tests that check what exists
 
 
 @functools.lru_cache(maxsize=1)
@@ -73,31 +74,53 @@ def model_from_xmlid(ref: str) -> str | None:
 
 
 class _Types:
-    """Which Odoo model a name or expression holds, as far as it is statically obvious."""
+    """Which Odoo model a name or expression holds, as far as it is statically obvious.
+
+    Flow-insensitive: a name bound to different models anywhere in the code (including a
+    preset such as ``record`` rebound to another model) has no known model."""
 
     def __init__(self, tree: ast.Module, action_model: str | None):
-        self.names: dict[str, str | None] = {"user": "res.users"}
+        presets: dict[str, str] = {"user": "res.users"}
         if action_model:
-            self.names.update(record=action_model, records=action_model, model=action_model)
+            presets.update(record=action_model, records=action_model, model=action_model)
+        self.names: dict[str, str | None] = dict(presets)
         assigned: dict[str, set[str | None]] = {}
+
+        def bind(target: ast.AST, model: str | None) -> None:
+            if isinstance(target, ast.Name):
+                assigned.setdefault(target.id, set()).add(model)
+            else:  # unpacking: a, b = ...; for i, rec in enumerate(...)
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name):
+                        assigned.setdefault(sub.id, set()).add(None)
+
         for _ in range(2):  # a second pass resolves names assigned from other names
             assigned.clear()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):
                     for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            assigned.setdefault(target.id, set()).add(self.model_of(node.value))
-                elif isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.target, ast.Name):
-                    assigned.setdefault(node.target.id, set()).add(self.model_of(node.iter))
+                        bind(target, self.model_of(node.value))
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    bind(node.target, self.model_of(node.value) if node.value is not None else None)
+                elif isinstance(node, ast.NamedExpr):
+                    bind(node.target, self.model_of(node.value))
+                elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                    bind(node.target, self.model_of(node.iter))
                 elif isinstance(node, ast.arg):
-                    assigned.setdefault(node.arg, set()).add(None)
+                    bind(ast.Name(node.arg), None)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) or \
+                        (isinstance(node, ast.ExceptHandler) and node.name):
+                    bind(ast.Name(node.name), None)
             for name, models in assigned.items():
-                self.names[name] = models.pop() if len(models) == 1 else None
+                if name in presets:
+                    models = models | {presets[name]}
+                self.names[name] = next(iter(models)) if len(models) == 1 else None
 
     def model_of(self, node: ast.AST) -> str | None:
         if isinstance(node, ast.Subscript):
-            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) and _is_env(node.value):
-                return node.slice.value
+            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                # env['res.partner'] is a model; record['partner_id'] is a field value of unknown model
+                return node.slice.value if _is_env(node.value) else None
             return self.model_of(node.value)  # records[0], records[1:]
         if isinstance(node, ast.Name):
             return self.names.get(node.id)
@@ -202,8 +225,11 @@ def check_fields(tree: ast.Module, version: str, action_model: str | None) -> li
     types = _Types(tree, action_model)
     uses, model_uses = _uses(tree, types)
     out: list[Diagnostic] = []
+    guards = _guards(tree)
     for model, line in model_uses:
         known = index.get(model)
+        if guards.covers(model, line, model=True):
+            continue
         if known is not None and not any(mask & bit for mask in known.values()):
             present = functools.reduce(lambda a, b: a | b, known.values(), 0)
             out.append(Diagnostic(line, "W205", f"model `{model}` is not in Odoo Community "
@@ -213,7 +239,7 @@ def check_fields(tree: ast.Module, version: str, action_model: str | None) -> li
     seen: set[tuple[str, str, int]] = set()
     for model, field, line, _kind in uses:
         known = index.get(model)
-        if known is None or field.startswith(("_", "x_")) or (model, field, line) in seen:
+        if known is None or field.startswith(("_", "x_")) or (model, field, line) in seen or guards.covers(field, line):
             continue
         mask = known.get(field)
         if mask is None or mask & bit:
@@ -241,21 +267,39 @@ class LiveSchema:
     fields: dict[str, frozenset[str]] = dc_field(default_factory=dict)
 
 
-def _guarded_models(tree: ast.Module) -> set[str]:
-    """Models the code looks up only after checking for them ('x.y' in env) or inside try:."""
-    guarded = set()
+@dataclass(frozen=True)
+class _Guards:
+    """Names the code checks for before using them, and lines inside ``try:`` with handlers."""
+    models: frozenset[str]  # 'x.y' in env / in env.registry
+    fields: frozenset[str]  # 'x_field' in rec._fields
+    lines: frozenset[int]
+
+    def covers(self, name: str, line: int, *, model: bool = False) -> bool:
+        return name in (self.models if model else self.fields) or line in self.lines
+
+
+def _is_registry(node: ast.AST) -> bool:
+    return _is_env(node) or (isinstance(node, ast.Attribute) and node.attr == "registry" and _is_env(node.value))
+
+
+def _guards(tree: ast.Module) -> _Guards:
+    models, names, lines = set(), set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant) \
-                and isinstance(node.left.value, str) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops) \
-                and any(_is_env(c) for c in node.comparators):
-            guarded.add(node.left.value)
+                and isinstance(node.left.value, str) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            if any(_is_registry(c) for c in node.comparators):
+                models.add(node.left.value)
+            if any(isinstance(c, ast.Attribute) and c.attr == "_fields" for c in node.comparators):
+                names.add(node.left.value)
         elif isinstance(node, ast.Try) and node.handlers:
             for stmt in node.body:
-                for sub in ast.walk(stmt):
-                    if isinstance(sub, ast.Subscript) and _is_env(sub.value) and isinstance(sub.slice, ast.Constant) \
-                            and isinstance(sub.slice.value, str):
-                        guarded.add(sub.slice.value)
-    return guarded
+                lines.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+        elif isinstance(node, ast.If) and any(
+                isinstance(sub, ast.Subscript) and _is_env(sub.value) and isinstance(sub.slice, ast.Constant)
+                and sub.slice.value in INSTALLATION_MODELS for sub in ast.walk(node.test)):
+            for stmt in node.body:  # if env['ir.module.module'].search_count([... 'installed' ...]):
+                lines.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+    return _Guards(frozenset(models), frozenset(names), frozenset(lines))
 
 
 def check_live_fields(tree: ast.Module, version: str, action_model: str | None,
@@ -270,15 +314,16 @@ def check_live_fields(tree: ast.Module, version: str, action_model: str | None,
     types = _Types(tree, action_model)
     uses, model_uses = _uses(tree, types)
     out: list[Diagnostic] = []
-    guarded = _guarded_models(tree)
+    guards = _guards(tree)
     for model, line in model_uses:
-        if model not in schema.models and model not in guarded:
+        if model not in schema.models and not guards.covers(model, line, model=True):
             out.append(Diagnostic(line, "E205", f"model `{model}` is not installed in this database "
                                                 f"(KeyError, {RUNTIME})"))
     seen: set[tuple[str, str, int]] = set()
     for model, field, line, kind in uses:
         live = schema.fields.get(model)
-        if live is None or field in live or field in MAGIC_FIELDS or (model, field, line) in seen:
+        if live is None or field in live or field in MAGIC_FIELDS or (model, field, line) in seen \
+                or guards.covers(field, line):
             continue
         known = index.get(model, {})
         evidence = field in known or field.startswith("x_")  # a field name in some Odoo version, or custom

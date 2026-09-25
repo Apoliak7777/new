@@ -32,6 +32,8 @@ class MockOdoo:
         self.fail_once: dict[str, tuple[int, dict]] = {}  # path -> (status, headers)
         self.redirect: dict[str, str] = {}  # path -> Location
         self.html_everywhere = False
+        self.raw: dict[str, tuple[int, str, bytes, dict]] = {}  # path -> (status, content type, body, headers)
+        self.ignore_offset = False
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
 
@@ -75,7 +77,7 @@ class MockOdoo:
         for row in sorted(rows, key=lambda r: r["id"]):
             if all(self._match(row, leaf) for leaf in domain):
                 out.append({"id": row["id"], **{f: row.get(f, False) for f in fields or known}})
-        out = out[offset or 0:]
+        out = out if self.ignore_offset else out[offset or 0:]
         return out[:limit] if limit else out
 
     @staticmethod
@@ -117,6 +119,9 @@ class MockOdoo:
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 mock.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
+                if self.path in mock.raw:
+                    status, ctype, payload, headers = mock.raw[self.path]
+                    return self._send(status, payload, ctype, headers)
                 if self.path in mock.redirect:
                     return self._send(307, b"", "text/html", {"Location": mock.redirect[self.path]})
                 if self.path in mock.fail_once:

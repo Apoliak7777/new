@@ -94,11 +94,14 @@ sevlint: mycompany.odoo.com: Odoo 19.0+e (Enterprise), 57 code action(s) read vi
 * **Read-only**: the client calls no other method and refuses to (tested). Odoo API keys have
   no read-only scope, so this guarantee is sevlint's, not Odoo's: create a dedicated key and revoke
   it afterwards (Odoo 18+ lets you set a short duration). Reading server actions needs the
-  *Administration / Settings* group.
+  *Administration / Settings* group. The only trace in the database: an XML-RPC login (17/18)
+  is recorded in `res.users.log` like any login; JSON-2 requests are not.
 * **The API key** comes from `$ODOO_API_KEY` (`--api-key-env` names another variable), the keyring
   (`keyring set sevlint mycompany.odoo.com`, if the `keyring` package is installed) or a hidden
   prompt; never from the command line. It is sent only to the given host: redirects are refused,
-  plain `http://` only to localhost (`--allow-http` overrides), and it never appears in the output.
+  plain `http://` only to localhost (`--allow-http` overrides) and never through a proxy, and it
+  never appears in the output, even when the server echoes it. Server answers are untrusted:
+  malformed ones end with a message and exit code 2, not a traceback.
 * **Field checks against the database** replace the bundled index: **E204** a field the database
   does not have (in domains, `rec['x']`, `mapped()`/`filtered()`/`sorted()`/`read()`, and `rec.x` when
   `x` is an `x_` name or a field of some Odoo version), **W204** an unknown key in

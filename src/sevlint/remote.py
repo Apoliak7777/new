@@ -3,9 +3,12 @@
 What is read: the server version (the unauthenticated ``/web/webclient/version_info``) and
 ``search_read`` on ir.module.module, ir.actions.server, ir.cron, base.automation, ir.model and
 ir.model.fields, through JSON-2 (Odoo 19+) or XML-RPC (17.0-18.x). The client refuses any
-other method, so nothing can be written. The API key comes from an environment variable, the
-keyring or a prompt (never from the command line), goes only to the given host (redirects
-are refused, plain http only to localhost) and never appears in any output.
+other method, so sevlint writes nothing (an XML-RPC login is recorded in res.users.log, like
+any login; JSON-2 bearer requests are not). The API key comes from an environment variable,
+the keyring or a prompt (never from the command line), goes only to the given host (redirects
+are refused, plain http only to localhost and never through a proxy) and never appears in
+any output. Whatever the server answers is untrusted: malformed answers are errors, not
+crashes.
 """
 from __future__ import annotations
 
@@ -29,7 +32,14 @@ from . import __version__, fields, profile as profiles, sources
 from .linter import Options, Report, _lint_into
 
 READ_METHODS = frozenset({"search_read"})  # the only model method sevlint ever calls
+XMLRPC_CALLS = frozenset({("common", "authenticate"), ("object", "execute_kw")})
 PAGE = 200
+MAX_ROWS = 1_000_000  # per search_read; a server ignoring offset would otherwise page forever
+MAX_RESPONSE = 64 * 1024 * 1024
+API_KEY_RE = re.compile(r"[\x21-\x7e]+")  # printable ASCII, no whitespace
+# Technical names from the server end up in messages and --dump headers: no spaces, newlines or '='.
+TECHNICAL_RE = re.compile(r"[\w.\-]+")
+BINDING_RE = re.compile(r"[a-z_]+(,[a-z_]+)*")
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 DEFAULT_KEY_ENV = "ODOO_API_KEY"
 KEYRING_SERVICE = "sevlint"
@@ -73,7 +83,12 @@ class Transport:
                  opener: urllib.request.OpenerDirector | None = None):
         self.base = base
         self.timeout = timeout
-        self.opener = opener or urllib.request.build_opener(_NoRedirect)
+        if opener is None:
+            # https goes through a configured proxy as an encrypted tunnel; plain http (localhost or
+            # --allow-http) would hand the Authorization header to the proxy in clear, so never proxy it.
+            handlers = [urllib.request.ProxyHandler({})] if base.startswith("http://") else []
+            opener = urllib.request.build_opener(*handlers, _NoRedirect)
+        self.opener = opener
         host = urllib.parse.urlsplit(base).hostname or ""
         self.min_interval = (1.0 if host.endswith(".odoo.com") else 0.0) if min_interval is None else min_interval
         self.secret: str | None = None
@@ -96,9 +111,18 @@ class Transport:
                                              headers={"User-Agent": f"sevlint/{__version__}", **headers})
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
-                    return response.status, response.headers.get_content_type(), response.read()
+                    return response.status, response.headers.get_content_type(), _read(response)
+            except RemoteError as err:  # a redirect (_NoRedirect), or a response too large
+                raise RemoteError(self.redact(str(err))) from None
             except urllib.error.HTTPError as err:
-                data = err.read()
+                try:
+                    data = _read(err)
+                except (RemoteError, OSError, http.client.HTTPException):
+                    data = b""
+                if 300 <= err.code < 400:  # redirects urllib does not handle itself (e.g. 308 on 3.10)
+                    location = err.headers.get("Location", "?") if err.headers else "?"
+                    raise RemoteError(self.redact(f"{self.base}{path} answered HTTP {err.code} (to {location}); "
+                                                  f"pass the final URL instead")) from None
                 if err.code in (429, 503) and attempt < MAX_RETRIES:
                     time.sleep(_retry_after(err.headers.get("Retry-After") if err.headers else None, attempt))
                     continue
@@ -109,6 +133,21 @@ class Transport:
             finally:
                 self._last = time.monotonic()
         raise AssertionError("unreachable")
+
+
+def _read(response) -> bytes:
+    data = response.read(MAX_RESPONSE + 1)
+    if len(data) > MAX_RESPONSE:
+        raise RemoteError(f"response larger than {MAX_RESPONSE // (1024 * 1024)} MiB")
+    return data
+
+
+def _json(data: bytes):
+    """Parsed JSON, or None for anything that is not (including pathologically nested) JSON."""
+    try:
+        return json.loads(data)
+    except (ValueError, RecursionError):
+        return None
 
 
 def _retry_after(value: str | None, attempt: int) -> float:
@@ -128,26 +167,39 @@ class ServerInfo:
 def server_version(transport: Transport) -> ServerInfo:
     body = json.dumps({"jsonrpc": "2.0", "method": "call", "params": {}, "id": 1}).encode()
     status, ctype, data = transport.post("/web/webclient/version_info", body, {"Content-Type": "application/json"})
-    try:
-        result = json.loads(data)["result"] if status == 200 and ctype == "application/json" else None
-        series = str(result["server_serie"])
-    except (ValueError, KeyError, TypeError):
-        raise RemoteError(f"{transport.base} does not answer like an Odoo server "
-                          f"(version_info: HTTP {status}, {ctype or 'no content type'})") from None
-    info = result.get("server_version_info") or []
-    return ServerInfo(profiles.normalize_version(series), str(result.get("server_version", series)),
-                      len(info) > 5 and info[5] == "e")
+    payload = _json(data) if status == 200 and ctype == "application/json" else None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    series = result.get("server_serie") if isinstance(result, dict) else None
+    if not isinstance(series, str) or not series:
+        raise RemoteError(transport.redact(f"{transport.base} does not answer like an Odoo server "
+                                           f"(version_info: HTTP {status}, {ctype or 'no content type'})"))
+    info = result.get("server_version_info")
+    enterprise = isinstance(info, list) and len(info) > 5 and info[5] == "e"
+    version = result.get("server_version")
+    return ServerInfo(profiles.normalize_version(series), version if isinstance(version, str) else series, enterprise)
 
 
-def _paged(fetch) -> list[dict]:
+def _is_id(value) -> bool:
+    return type(value) is int and value > 0  # not bool, not str/float from a hostile server
+
+
+def _paged(model: str, fetch) -> list[dict]:
+    """All pages of a search_read ordered by id; every row a dict with an integer id."""
     out: list[dict] = []
+    seen: set[int] = set()
     while True:
         batch = fetch(len(out))
-        if not isinstance(batch, list):
-            raise RemoteError(f"unexpected search_read result: {type(batch).__name__}")
-        out += batch
+        if not isinstance(batch, list) or not all(isinstance(row, dict) and _is_id(row.get("id")) for row in batch):
+            raise RemoteError(f"{model}.search_read: unexpected result (expected records with an integer id)")
+        fresh = [row for row in batch if row["id"] not in seen]
+        if batch and not fresh:
+            raise RemoteError(f"{model}.search_read: the server repeats the same page (it ignores offset)")
+        seen.update(row["id"] for row in fresh)
+        out += fresh
         if len(batch) < PAGE:
             return out
+        if len(out) >= MAX_ROWS:
+            raise RemoteError(f"{model}.search_read: more than {MAX_ROWS} records")
 
 
 def _only_reads(model: str, method: str) -> None:
@@ -168,15 +220,11 @@ class Json2Client:
         if self.db:
             headers["X-Odoo-Database"] = self.db
         status, ctype, data = self.transport.post(f"/json/2/{model}/{method}", json.dumps(params).encode(), headers)
-        payload = None
-        if ctype == "application/json":
-            try:
-                payload = json.loads(data)
-            except ValueError:
-                pass
+        payload = _json(data) if ctype == "application/json" else None
         if status == 200 and ctype == "application/json":
             return payload
         message = payload.get("message") if isinstance(payload, dict) else None
+        message = message if isinstance(message, str) else None
         if status == 401:
             raise RemoteError("authentication failed: check the API key (and --db on a multi-database server)")
         if status == 404 and message is None:
@@ -187,12 +235,12 @@ class Json2Client:
             raise RemoteError(self.transport.redact(f"{model}.{method}: access denied ({message or 'HTTP 403'}); the "
                                                     f"API key's user needs Administration / Settings"))
         if status == 200:
-            raise RemoteError(f"{model}.{method}: expected JSON, got {ctype or 'no content type'}")
+            raise RemoteError(self.transport.redact(f"{model}.{method}: expected JSON, got {ctype or 'no content type'}"))
         raise RemoteError(self.transport.redact(f"{model}.{method}: HTTP {status}: {message or 'no details'}"))
 
     def search_read(self, model: str, domain: list, field_names: list[str], context: dict | None = None) -> list[dict]:
-        return _paged(lambda offset: self.call(model, "search_read", domain=domain, fields=field_names,
-                                               offset=offset, limit=PAGE, order="id", context=context or {}))
+        return _paged(model, lambda offset: self.call(model, "search_read", domain=domain, fields=field_names,
+                                                      offset=offset, limit=PAGE, order="id", context=context or {}))
 
 
 class XmlRpcClient:
@@ -206,6 +254,10 @@ class XmlRpcClient:
             raise RemoteError("authentication failed: check --user (the API key's login), --db and the API key")
 
     def _rpc(self, service: str, method: str, *params):
+        if (service, method) not in XMLRPC_CALLS:
+            raise RemoteError(f"refusing to call XML-RPC {service}.{method}: sevlint only reads")
+        if method == "execute_kw":
+            _only_reads(params[3], params[4])
         body = xmlrpc.client.dumps(params, method, allow_none=True).encode()
         status, ctype, data = self.transport.post(f"/xmlrpc/2/{service}", body, {"Content-Type": "text/xml"})
         if status != 200:
@@ -216,19 +268,27 @@ class XmlRpcClient:
         except xmlrpc.client.Fault as fault:
             lines = [line for line in str(fault.faultString).splitlines() if line.strip()]
             raise RemoteError(self.transport.redact(f"XML-RPC {service}.{method}: {lines[-1] if lines else fault.faultCode}")) from None
-        except (ExpatError, ValueError, xmlrpc.client.ResponseError):
-            raise RemoteError(f"XML-RPC {service}.{method}: not an XML-RPC response ({ctype or 'no content type'})") from None
+        except (ExpatError, ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
+                xmlrpc.client.ResponseError):  # malformed: a fault without faultCode, a member without value, ...
+            raise RemoteError(self.transport.redact(f"XML-RPC {service}.{method}: not an XML-RPC response "
+                                                    f"({ctype or 'no content type'})")) from None
         return result
 
     def search_read(self, model: str, domain: list, field_names: list[str], context: dict | None = None) -> list[dict]:
-        _only_reads(model, "search_read")
-        return _paged(lambda offset: self._rpc(
+        return _paged(model, lambda offset: self._rpc(
             "object", "execute_kw", self.db, self.uid, self._key, model, "search_read", [domain],
             {"fields": field_names, "offset": offset, "limit": PAGE, "order": "id", "context": context or {}}))
 
 
 def api_key(env_var: str, host: str, *, interactive: bool | None = None) -> str:
     """The API key from ``env_var``, else the keyring (service 'sevlint', user = host), else a prompt."""
+    key = _find_key(env_var, host, interactive)
+    if not API_KEY_RE.fullmatch(key):  # a pasted newline would otherwise surface in an HTTP error message
+        raise RemoteError("the API key contains whitespace or non-ASCII characters; check how it was pasted")
+    return key
+
+
+def _find_key(env_var: str, host: str, interactive: bool | None) -> str:
     key = os.environ.get(env_var, "").strip()
     if key:
         return key
@@ -288,37 +348,56 @@ class Snapshot:
 
 
 def _m2o_id(value) -> int | None:
-    return value[0] if isinstance(value, (list, tuple)) and value else None
+    return value[0] if isinstance(value, (list, tuple)) and value and _is_id(value[0]) else None
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _technical(value) -> str | None:
+    """A model, module or xml id; anything else a server sends is dropped."""
+    return value if isinstance(value, str) and TECHNICAL_RE.fullmatch(value) else None
+
+
+def _binding(value) -> str | None:
+    value = value.replace(" ", "") if isinstance(value, str) else None
+    return value if value and BINDING_RE.fullmatch(value) else None
 
 
 def fetch(client, ids: list[int] | None = None) -> Snapshot:
-    modules = frozenset(r["name"] for r in client.search_read("ir.module.module", [["state", "=", "installed"]],
-                                                              ["name"]))
+    modules = frozenset(name for r in client.search_read("ir.module.module", [["state", "=", "installed"]], ["name"])
+                        if (name := _technical(r.get("name"))))
     domain = [["state", "=", "code"]] + ([["id", "in", ids]] if ids else [])
     wanted = ["name", "code", "model_name", "usage", "binding_model_id", "binding_view_types", "xml_id"]
     automations = "base_automation" in modules
     if automations:
         wanted.append("base_automation_id")
     rows = client.search_read("ir.actions.server", domain, wanted, {"active_test": False})
-    inactive: set[int] = set()
-    for cron in client.search_read("ir.cron", [["active", "=", False]], ["ir_actions_server_id"],
-                                   {"active_test": False}):
-        inactive.add(_m2o_id(cron["ir_actions_server_id"]))
+    inactive = {_m2o_id(cron.get("ir_actions_server_id"))
+                for cron in client.search_read("ir.cron", [["active", "=", False]], ["ir_actions_server_id"],
+                                               {"active_test": False})}
     archived_rules: set[int] = set()
     if automations:
         archived_rules = {r["id"] for r in client.search_read("base.automation", [["active", "=", False]], ["id"],
                                                               {"active_test": False})}
     actions = []
     for row in rows:
-        code = row.get("code") or ""
+        code = row.get("code")
+        if code is False or code is None:
+            continue
+        if not isinstance(code, str):
+            raise RemoteError(f"ir.actions.server/{row['id']}: unexpected code value ({type(code).__name__})")
         if not code.strip():
             continue
-        caller = USAGE_CALLER.get(row.get("usage"), "server_action")
+        name = row.get("name")
         active = row["id"] not in inactive and _m2o_id(row.get("base_automation_id")) not in archived_rules
         actions.append(RemoteAction(
-            id=row["id"], name=str(row.get("name") or ""), code=code, model=row.get("model_name") or None,
-            caller=caller, binding=(row.get("binding_view_types") or None) if row.get("binding_model_id") else None,
-            xml_id=row.get("xml_id") or "", active=active))
+            id=row["id"], name=name if isinstance(name, str) else "", code=code,
+            model=_technical(row.get("model_name")),
+            caller=USAGE_CALLER.get(_text(row.get("usage")) or "", "server_action"),
+            binding=_binding(row.get("binding_view_types")) if row.get("binding_model_id") else None,
+            xml_id=_technical(row.get("xml_id")) or "", active=active))
     return Snapshot(modules, actions)
 
 
@@ -327,12 +406,16 @@ def fetch_schema(client, models: set[str]) -> fields.LiveSchema:
     wanted = sorted(models)
     if not wanted:
         return fields.LiveSchema(frozenset())
-    installed = {r["model"] for r in client.search_read("ir.model", [["model", "in", wanted]], ["model"])}
+    installed = {model for r in client.search_read("ir.model", [["model", "in", wanted]], ["model"])
+                 if (model := _technical(r.get("model")))}
     by_model: dict[str, set[str]] = {m: set() for m in installed}
     if installed:
         for row in client.search_read("ir.model.fields", [["model", "in", sorted(installed)]], ["model", "name"]):
-            by_model.setdefault(row["model"], set()).add(row["name"])
-    return fields.LiveSchema(frozenset(installed), {m: frozenset(f) for m, f in by_model.items()})
+            model, name = _text(row.get("model")), _text(row.get("name"))
+            if model in by_model and name:
+                by_model[model].add(name)
+    # Every real model has fields (id at least); an empty set means the answer was incomplete: do not judge.
+    return fields.LiveSchema(frozenset(installed), {m: frozenset(f) for m, f in by_model.items() if f})
 
 
 def models_used(actions: list[RemoteAction]) -> set[str]:
@@ -373,8 +456,8 @@ def dump(snapshot: Snapshot, version: str, directory: Path) -> list[Path]:
         if modules:
             header.append(f"modules={','.join(modules)}")
         if action.binding:
-            header.append(f"binding={action.binding.replace(' ', '')}")
-        path = directory / f"{action.id}_{_slug(action.name)}.py"
+            header.append(f"binding={action.binding}")
+        path = directory / f"{int(action.id)}_{_slug(action.name)}.py"
         path.write_text(f"# {action.path} {action.label}\n# sevlint: {' '.join(header)}\n{action.code.strip()}\n",
                         encoding="utf-8")
         written.append(path)

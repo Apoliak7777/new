@@ -301,6 +301,11 @@ def cmd_remote(args: argparse.Namespace) -> int:
     if only - set(CALLERS):
         print(f"sevlint: --only takes {', '.join(CALLERS)}", file=sys.stderr)
         return 2
+    transport = None
+
+    def redact(text: str) -> str:
+        return transport.redact(text) if transport is not None else text
+
     try:
         ids = _ids(args.ids)
         found = args.config or config.find(Path.cwd() / "-")
@@ -320,11 +325,11 @@ def cmd_remote(args: argparse.Namespace) -> int:
             schema = remote.fetch_schema(client, remote.models_used(snapshot.actions))
         report = remote.lint(snapshot, version, opts, schema)
         written = remote.dump(snapshot, version, args.dump) if args.dump else []
-    except remote.RemoteError as err:
-        print(f"sevlint: {err}", file=sys.stderr)
+    except (remote.RemoteError, config.ConfigError, OSError, ValueError) as err:
+        print(f"sevlint: {redact(str(err))}", file=sys.stderr)
         return 2
-    except (config.ConfigError, OSError, ValueError) as err:
-        print(f"sevlint: {err}", file=sys.stderr)
+    except Exception as err:  # noqa: BLE001 - a hostile or broken server must not produce a traceback
+        print(f"sevlint: internal error {type(err).__name__}: {redact(str(err))}; please report it", file=sys.stderr)
         return 2
     edition = "Enterprise" if info.enterprise else "Community"
     db = f" db {args.db}" if args.db else ""
@@ -337,13 +342,14 @@ def cmd_remote(args: argparse.Namespace) -> int:
         report.notes.append("fields checked with the bundled index (--no-schema)")
     if written:
         report.notes.append(f"wrote {len(written)} file(s) to {args.dump}")
-    output = render(report, args.format)
+    output = redact(render(report, args.format))  # labels and messages quote what the server sent
     if output:
         print(output)
     running = "%d.%d" % sys.version_info[:2]
-    wrong = args.target_python if args.target_python and args.target_python != running else None
+    target = args.target_python or opts.target_python
+    wrong = target if target and target != running else None
     for line in report.problems + report.notes + _python_notes(report, wrong):
-        print(f"sevlint: {line}", file=sys.stderr)
+        print(f"sevlint: {redact(line)}", file=sys.stderr)
     if args.format == "text":
         print(f"sevlint: {report.errors} error(s), {report.warnings} warning(s) in {report.snippets} action(s)",
               file=sys.stderr)
@@ -379,6 +385,10 @@ def cmd_versions(_: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:  # a Windows console or pipe (cp1252) cannot encode every action name or path
+        sys.stdout.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
     args = _build_parser().parse_args(argv)
     if args.command == "check":
         return cmd_check(args)

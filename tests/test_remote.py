@@ -383,3 +383,203 @@ def test_wrong_db_and_access_denied(capsys):
     with pytest.raises(remote.RemoteError, match="access denied .You are not allowed.; the API key's user needs "
                                                  "Administration / Settings"):
         client.search_read("ir.actions.server", [], ["name"])
+
+
+
+# -- review regressions: no E204/E205 on valid code ---------------------------------------
+
+STUDIO = fields.LiveSchema(
+    frozenset({"res.partner", "sale.order", "res.users", "ir.module.module", "ir.model"}),
+    {"res.partner": frozenset(PARTNER + ["x_studio_tier", "parent_id"]),
+     "sale.order": frozenset(["name", "partner_id", "x_studio_rank", "x_studio_done"]),
+     "res.users": frozenset(USERS + ["x_studio_tier"])})
+
+
+@pytest.mark.parametrize("model, code", [
+    ("sale.order", "partner = record['partner_id']\nif partner.x_studio_tier == 'gold':\n"
+                   "    partner.write({'x_studio_tier': 'platinum'})\n"),
+    ("sale.order", "tier = record['partner_id']['x_studio_tier']\n"),
+    ("res.partner", "for idx, record in enumerate(env['sale.order'].search([('partner_id', 'in', records.ids)])):\n"
+                    "    record.write({'x_studio_rank': idx})\n"),
+    ("res.partner", "if (record := env['sale.order'].search([], limit=1)):\n    record.write({'x_studio_done': True})\n"),
+    ("res.partner", "records, others = env['sale.order'].search([]), env['res.partner']\n"
+                    "records.write({'x_studio_done': True})\n"),
+    ("res.partner", "for user, n in [(u, 1) for u in env['res.partner'].search([])]:\n"
+                    "    user.write({'x_studio_tier': 'gold'})\n"),
+    ("sale.order", "for partner in records.grouped('partner_id'):\n    partner.write({'x_studio_tier': 'gold'})\n"),
+    ("sale.order", "order_tier = record.x_studio_rank\nrecord = env['res.partner'].browse(record.partner_id.id)\n"
+                   "record.write({'x_studio_tier': order_tier})\n"),
+    ("res.partner", "if 'x_studio_legacy' in record._fields:\n    record.write({'x_studio_legacy': False})\n"),
+    ("res.partner", "try:\n    record.write({'x_studio_legacy': False})\nexcept Exception:\n    pass\n"),
+    ("res.partner", "if 'x_fleet.vehicle' in env.registry:\n    env['x_fleet.vehicle'].search([])\n"),
+    ("res.partner", "if env['ir.module.module'].search_count([('name', '=', 'fleet'), ('state', '=', 'installed')]):\n"
+                    "    env['fleet.vehicle'].search([])\n"),
+    ("res.partner", "if env['ir.model'].search_count([('model', '=', 'x_fleet.vehicle')]):\n"
+                    "    env['x_fleet.vehicle'].search([])\n"),
+])
+def test_live_no_false_positive(model, code):
+    assert [(d.line, d.code) for d in fields.check_live_fields(ast.parse(code), "19.0", model, STUDIO)] == []
+
+
+def test_live_still_reports_after_the_fixes():
+    code = ("partner = record.partner_id\n"            # unknown model: not judged
+            "record.write({'x_studio_rnak': 1})\n"     # typo on the action's model
+            "env['x_fleet.vehicle'].search([])\n")      # unguarded
+    diags = fields.check_live_fields(ast.parse(code), "19.0", "sale.order", STUDIO)
+    assert sorted((d.line, d.code) for d in diags) == [(2, "E204"), (3, "E205")]
+
+
+
+# -- review regressions: hostile or broken servers ---------------------------------------
+
+def test_redirect_location_with_the_key_is_redacted(capsys):
+    with MockOdoo("19.0", tables=tables([])) as odoo:
+        odoo.raw["/json/2/ir.module.module/search_read"] = (
+            302, "text/html", b"", {"Location": f"https://evil.example/steal?k={API_KEY}"})
+        code, out, err = run(["remote", odoo.url], capsys)
+    assert code == 2 and "redirects to https://evil.example/steal?k=***" in err and API_KEY not in out + err
+
+
+@pytest.mark.parametrize("path, ctype", [
+    ("/json/2/ir.module.module/search_read", f"text/{API_KEY}"),
+    ("/xmlrpc/2/common", f"text/{API_KEY}"),
+])
+def test_content_type_echo_is_redacted(capsys, path, ctype):
+    series, argv = ("19.0", []) if "json" in path else ("17.0", ["--db", DB, "--user", LOGIN])
+    with MockOdoo(series, tables=tables([])) as odoo:
+        odoo.raw[path] = (200, ctype, b"garbage", {})
+        code, out, err = run(["remote", odoo.url, *argv], capsys)
+    assert code == 2 and "***" in err and API_KEY not in out + err
+
+
+def test_findings_echoing_the_key_are_redacted(capsys):
+    acts = [action(1, "x = type(1)\n", name=f"uses {API_KEY}")]
+    with MockOdoo("19.0", tables=tables(acts)) as odoo:
+        code, out, err = run(["remote", odoo.url], capsys)
+    assert code == 1 and "uses ***" in out and API_KEY not in out + err
+
+
+def test_key_with_whitespace_is_refused_without_echo(capsys, monkeypatch):
+    broken = API_KEY[:20] + "\n" + API_KEY[20:]
+    monkeypatch.setenv("ODOO_API_KEY", broken)
+    with MockOdoo("19.0", tables=tables([])) as odoo:
+        code, out, err = run(["remote", odoo.url], capsys)
+        assert not any(r["path"].startswith("/json/2/") for r in odoo.requests)
+    assert code == 2 and "whitespace or non-ASCII" in err
+    assert API_KEY[:20] not in out + err and API_KEY[20:] not in out + err
+
+
+def test_plain_http_never_goes_through_a_proxy(capsys, monkeypatch):
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var)
+    for var in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")  # nothing listens: a proxied request would fail
+    with MockOdoo("19.0", tables=tables([action(1, "x = 1\n")])) as odoo:
+        code, _, err = run(["remote", odoo.url], capsys)
+    assert code == 0 and "1 code action(s)" in err
+
+
+@pytest.mark.parametrize("bad_id", ["/tmp/outside/test", "../outside/test", 1.5, True, {"a": 1}])
+def test_non_integer_ids_are_refused(tmp_path, capsys, bad_id):
+    row = action(1, "x = 1\n")
+    row["id"] = bad_id
+    with MockOdoo("19.0", tables=tables([])) as odoo:
+        odoo.tables["ir.actions.server"] = [row]
+        code, _, err = run(["remote", odoo.url, "--dump", str(tmp_path / "dump")], capsys)
+    assert code == 2 and "expected records with an integer id" in err
+    assert not (tmp_path / "outside").exists() and not list(tmp_path.rglob("*.py"))
+
+
+def test_server_ignoring_offset_stops(capsys, monkeypatch):
+    monkeypatch.setattr(remote, "PAGE", 2)
+    with MockOdoo("19.0", tables=tables([action(i, "x = 1\n") for i in range(1, 5)])) as odoo:
+        odoo.ignore_offset = True
+        code, _, err = run(["remote", odoo.url], capsys)
+    assert code == 2 and "ignores offset" in err
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("code", 5, 2), ("code", ["x"], 2),  # not text: refused
+    ("usage", ["x"], 0), ("model_name", ["x"], 0), ("xml_id", None, 0), ("name", {"en_US": "x"}, 0),  # dropped
+])
+def test_malformed_values(capsys, field, value, expected):
+    row = action(1, "x = 1\n")
+    row[field] = value
+    with MockOdoo("19.0", tables=tables([row])) as odoo:
+        code, _, err = run(["remote", odoo.url], capsys)
+    assert code == expected and "Traceback" not in err
+    assert ("unexpected code value" in err) == (field == "code")
+
+
+@pytest.mark.parametrize("payload, expected", [
+    (b"[" * 200000, 2),  # nested beyond the recursion limit
+    (b'{"jsonrpc": "2.0", "result": "x"}', 2),
+    (b'{"result": {"server_serie": ["19.0"]}}', 2),
+    (b'{"result": {"server_serie": "19.0", "server_version_info": 5}}', 0),  # edition unknown: tolerated
+])
+def test_malformed_version_info(capsys, payload, expected):
+    with MockOdoo("19.0", tables=tables([])) as odoo:
+        odoo.raw["/web/webclient/version_info"] = (200, "application/json", payload, {})
+        code, _, err = run(["remote", odoo.url], capsys)
+    assert code == expected and "Traceback" not in err
+    if expected == 2:
+        assert "does not answer like an Odoo server" in err
+
+
+def test_malformed_xmlrpc_fault(capsys):
+    fault = (b"<?xml version='1.0'?><methodResponse><fault><value><struct>"
+             b"<member><name>faultString</name><value><string>boom</string></value></member>"
+             b"</struct></value></fault></methodResponse>")
+    with MockOdoo("17.0", tables=tables([])) as odoo:
+        odoo.raw["/xmlrpc/2/common"] = (200, "text/xml", fault, {})
+        code, _, err = run(["remote", odoo.url, "--db", DB, "--user", LOGIN], capsys)
+    assert code == 2 and "not an XML-RPC response" in err and "Traceback" not in err
+
+
+def test_xmlrpc_client_refuses_other_calls():
+    client = remote.XmlRpcClient.__new__(remote.XmlRpcClient)
+    client.transport = remote.Transport("http://127.0.0.1:9")
+    with pytest.raises(remote.RemoteError, match="only reads"):
+        client._rpc("object", "execute_kw", DB, 2, API_KEY, "res.partner", "write", [[1], {}], {})
+    with pytest.raises(remote.RemoteError, match="only reads"):
+        client._rpc("db", "drop", "admin", DB)
+
+
+def test_dump_header_cannot_be_injected(tmp_path, capsys):
+    row = action(1, "x = type(1)\n", model="res.partner disable=E201", xml_id="a\n# sevlint: disable=E201",
+                 binding_model_id=[1, "x"], binding_view_types="list disable=E201")
+    with MockOdoo("19.0", tables=tables([row])) as odoo:
+        run(["remote", odoo.url, "--dump", str(tmp_path)], capsys)
+    text = next(tmp_path.glob("*.py")).read_text()
+    assert text.count("sevlint:") == 1 and "disable" not in text
+    assert cli.main(["check", str(tmp_path)]) == 1  # the E201 is still reported offline
+
+
+def test_empty_live_field_set_is_not_judged(capsys):
+    acts = [action(1, "records.write({'x_studio_tier': 1})\n")]
+    with MockOdoo("19.0", tables=tables(acts)) as odoo:
+        odoo.tables["ir.model.fields"] = [{"id": 1, "model": "res.partner", "name": False}]
+        code, out, err = run(["remote", odoo.url], capsys)
+    assert code == 0 and "E204" not in out
+
+
+def test_config_target_python_is_enforced(tmp_path, capsys, monkeypatch):
+    pytest.importorskip("tomllib" if sys.version_info >= (3, 11) else "tomli")
+    other = "3.10" if sys.version_info[:2] != (3, 10) else "3.11"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".sevlint.toml").write_text(f'target-python = "{other}"\n')
+    with MockOdoo("19.0", tables=tables([action(1, "a = [1]\nb = (*a, 2)\n")])) as odoo:
+        code, _, err = run(["remote", odoo.url], capsys)
+    assert code == 2 and f"target-python {other} but running" in err
+
+
+def test_windows_console_encoding(capsys, monkeypatch):
+    import io
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1252")
+    acts = [action(1, "x = type(1)\n", name="Účtovanie faktúr")]
+    with MockOdoo("19.0", tables=tables(acts)) as odoo:
+        monkeypatch.setattr(sys, "stdout", stream)
+        code = cli.main(["remote", odoo.url])
+        stream.flush()
+    assert code == 1 and "'\u00da\\u010dtovanie fakt\u00far'".encode("cp1252") in buffer.getvalue()
