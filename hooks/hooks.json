@@ -1,0 +1,17 @@
+{
+  "description": "Lint Odoo server action code in .xml / '# sevlint:' .py files after Claude writes them",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
