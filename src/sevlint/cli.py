@@ -16,6 +16,8 @@ RULES = {
             "IndentationError. Rejected when saving.",
     "E003": "XML: child element inside <field name=\"code\">. Odoo's import_xml.rng allows only text there, "
             "so the module fails to install.",
+    "E004": "Odoo 19.3+/20.0 with --unsafe-policy=raise/terminate: the runtime sandbox refuses bare "
+            "`except:`, `async def` and async comprehensions. Rejected when saving.",
     "E101": "Forbidden opcode. The construct compiles to bytecode outside Odoo's _SAFE_OPCODES "
             "(import, `obj.attr = x`, `del d[k]`, assert, with, class, closures, a, *b = ...). "
             "Depends on the Python version Odoo runs on. Rejected when saving.",
@@ -31,6 +33,8 @@ RULES = {
     "W210": "Name provided only by an addon (json: base_automation/website, request: website, "
             "payload: base_automation + an HTTP request, never in scheduled runs). Declare installed modules "
             "with --modules or config. `request` in a scheduled action is an unbound proxy.",
+    "W220": "Odoo 19.3+/20.0 with the default --unsafe-policy=log: bare `except:` / async code is logged by the "
+            "sandbox and rejected once the server runs with --unsafe-policy=raise. Use `except Exception:`.",
     "W301": "env.cr.commit()/rollback() inside a server action: breaks atomicity of the action. "
             "Commits inside a loop of a scheduled action (batching) are not reported.",
     "W302": "ORM query method (search, search_count, read_group, ...) inside a loop, a per-record lambda "
@@ -59,6 +63,8 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("--names", default="", help="extra names to treat as defined (enterprise/custom context)")
     check.add_argument("--disable", default="", help="comma-separated codes to skip, e.g. W302,W303 (W* = all warnings)")
     check.add_argument("--all-py", action="store_true", help="lint .py files even without a '# sevlint:' header")
+    check.add_argument("--unsafe-policy", choices=("disable", "log", "raise", "terminate"),
+                       help="Odoo 19.3+/20.0 server option --unsafe-policy (default: the version's default, log)")
     check.add_argument("--target-python", help="fail unless running on this Python (X.Y), to match the Odoo server")
     check.add_argument("--format", choices=("text", "json", "github"), default="text")
     check.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
@@ -86,6 +92,7 @@ def options_from(args: argparse.Namespace, cfg: dict) -> Options:
         names=_csv(args.names) | frozenset(cfg.get("names", [])),
         disabled=_csv(args.disable) | frozenset(cfg.get("disable", [])),
         all_py=args.all_py,
+        unsafe_policy=getattr(args, "unsafe_policy", None) or cfg.get("unsafe-policy"),
     )
 
 
@@ -128,8 +135,8 @@ def _python_notes(report: Report, target: str | None) -> list[str]:
     for version in sorted(report.versions):
         prof = profiles.load(version)
         if not prof.python_supported:
-            lo, hi = ".".join(map(str, prof.python_min)), ".".join(map(str, prof.python_max))
-            notes.append(f"warning: Odoo {version} supports Python {lo}-{hi}; verdicts computed on {running} may differ")
+            notes.append(f"warning: Odoo {version} supports Python {prof.python_range}; verdicts computed on "
+                         f"{running} may differ")
     return notes
 
 
@@ -222,9 +229,9 @@ def cmd_versions(_: argparse.Namespace) -> int:
     running = "%d.%d" % sys.version_info[:2]
     for version in profiles.available_versions():
         prof = profiles.load(version)
-        lo, hi = ".".join(map(str, prof.python_min)), ".".join(map(str, prof.python_max))
         mark = "" if prof.python_supported else f"  (running {running} is outside this range)"
-        print(f"{version}  odoo/odoo@{prof.source_commit[:12]}  python {lo}-{hi}{mark}")
+        sandbox = f"  sandbox (unsafe_policy default: {prof.sandbox_policy})" if prof.sandbox_policy else ""
+        print(f"{version:<10} odoo/odoo@{prof.source_commit[:12]}  python {prof.python_range}{sandbox}{mark}")
     return 0
 
 

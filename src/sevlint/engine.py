@@ -238,6 +238,39 @@ def _forbidden_name_message(name: str) -> str:
     return f"access to forbidden name {name!r} (any name/attribute that {reason}) ({SAVE_TIME})"
 
 
+SANDBOX_POLICIES = ("disable", "log", "raise", "terminate")
+
+
+def check_sandbox(analysis: Analysis, profile: Profile, policy: str | None) -> list[Diagnostic]:
+    """19.3+/20.0: the runtime sandbox rewrites the code before the opcode check and refuses
+    bare ``except:`` and async code (odoo/tools/safe_eval/runtime.py _SafeTransformer): logged
+    with ``--unsafe-policy=log`` (the default), a SyntaxError on save with ``raise``/``terminate``."""
+    policy = policy or profile.sandbox_policy
+    if profile.sandbox_policy is None or analysis.tree is None or policy == "disable":
+        return []
+    rejected = policy in ("raise", "terminate")
+    out = []
+    for node in ast.walk(analysis.tree):
+        if isinstance(node, ast.Try):
+            constructs = [(h.lineno, "bare `except:`", "use `except Exception:`") for h in node.handlers
+                          if h.type is None]
+        elif isinstance(node, ast.AsyncFunctionDef):
+            constructs = [(node.lineno, "`async def`", "use a regular function")]
+        elif isinstance(node, ast.comprehension) and node.is_async:
+            constructs = [(node.iter.lineno, "async comprehension", "use a regular comprehension")]
+        else:
+            continue
+        for line, construct, hint in constructs:
+            if rejected:
+                out.append(Diagnostic(line, "E004", f"{construct} is refused by Odoo's sandbox with "
+                                                    f"unsafe_policy={policy}; {hint} ({SAVE_TIME})"))
+            else:
+                out.append(Diagnostic(line, "W220", f"{construct} is logged by Odoo's sandbox (unsafe_policy="
+                                                    f"{policy}) and rejected on save when the server runs with "
+                                                    f"--unsafe-policy=raise; {hint}", "warning"))
+    return out
+
+
 LOAD_NAME_OPS = {"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FROM_DICT_OR_GLOBALS"}
 STORE_NAME_OPS = {"STORE_NAME", "DELETE_NAME"}
 ATTR_OPS = {"LOAD_ATTR", "LOAD_METHOD"}

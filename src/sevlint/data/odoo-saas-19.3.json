@@ -1,21 +1,21 @@
 {
- "odoo_version": "18.0",
+ "odoo_version": "saas-19.3",
  "source": {
   "repository": "https://github.com/odoo/odoo",
-  "branch": "18.0",
-  "commit": "2802e2b73a85247a9d0933e655cfb16f7dbba64d",
-  "safe_eval_sha256": "63436ca7fb6931f3c740efb0d3b39349926efb79fc2d2875c85ef6a68972cfd0"
+  "branch": "saas-19.3",
+  "commit": "59057e47bf64c7b1d8a32557e8e553f1e5a62b8c",
+  "safe_eval_sha256": "5e07c2f9d3446365083ecb9aef2bda9f40e4bfcedfcfbfb972d10ae255b6c6bb"
  },
  "python": {
   "min": [
    3,
-   10
+   12
   ],
   "max": [
    3,
    14
   ],
-  "source": "odoo/__init__.py"
+  "source": "odoo/release.py"
  },
  "opcodes": {
   "blacklist": [
@@ -234,7 +234,11 @@
   "range",
   "xrange",
   "zip",
-  "Exception"
+  "Exception",
+  "_safe_eval_call",
+  "_safe_eval_deco",
+  "_safe_eval_gen_func",
+  "_safe_eval_gen_iter"
  ],
  "wrapped_modules": {
   "datetime": {
@@ -294,7 +298,7 @@
    "sleep": null
   }
  },
- "algorithm_fingerprint": "45b2c99b17811b93",
+ "algorithm_fingerprint": "a190c701f5cb9e13",
  "context": {
   "core": [
    "uid",
@@ -306,6 +310,7 @@
    "float_compare",
    "b64encode",
    "b64decode",
+   "BinaryBytes",
    "Command",
    "env",
    "model",
@@ -328,5 +333,7 @@
    ]
   }
  },
- "sandbox": null
+ "sandbox": {
+  "unsafe_policy_default": "log"
+ }
 }

@@ -16,8 +16,9 @@ examples/snippet.py:7: E202 `time.mktime` is not exposed by Odoo's wrapped `time
 
 * **Offline, no dependencies**: stdlib only. No Odoo installation, database, server or API key.
 * **Same verdict as Odoo**: the save-time check re-implements `_check_python_code` →
-  `test_python_expr(code.strip(), "exec")` with data extracted from Odoo's own `safe_eval.py`
-  for 17.0, 18.0 and 19.0. The test suite compares every verdict with the real `safe_eval.py`.
+  `test_python_expr(code.strip(), "exec")` with data extracted from Odoo's own `safe_eval`
+  for **17.0, 18.0, 19.0, 20.0 and every Odoo Online release saas-17.1 … saas-19.4**. The test suite
+  compares every verdict with the real `safe_eval` of each version, including the 19.3+ runtime sandbox.
 * **Beyond Odoo's own check**: undefined names, attributes that wrapped modules do not expose,
   and common bugs (N+1 queries, `cr.commit()`, rollback by `UserError`, `records` in crons).
 
@@ -52,7 +53,8 @@ Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input),
 | stdin | `sevlint check -` (the header is optional) |
 
 The Odoo series comes from the header, then the nearest `__manifest__.py` (`19.0.x.y.z`), then
-`--odoo`/config, then defaults to `19.0`. Installed modules are the module itself plus its
+`--odoo`/config, then defaults to `19.0`. Odoo Online versions are written `saas-19.2`; the forms
+`saas~19.2` (what Odoo shows) and `19.2` are accepted too. `sevlint versions` lists them all. Installed modules are the module itself plus its
 `depends`, followed through sibling modules of the same addons directory (symlinked modules too).
 
 Header keys (all optional):
@@ -67,11 +69,13 @@ Header keys (all optional):
 | --- | --- | --- |
 | E001 | save | Syntax error, or code too long/deep for the compiler. `strip()` removes only the first line's indentation, so an indented block is an `IndentationError`. |
 | E003 | install | XML: a child element inside `<field name="code">`; Odoo's `import_xml.rng` allows only text, so the module does not install. |
+| E004 | save | saas-19.3+/20.0 with `--unsafe-policy=raise`/`terminate`: the runtime sandbox refuses bare `except:`, `async def` and async comprehensions. |
 | E101 | save | Forbidden opcode: `import`, `obj.attr = x`, `del d[k]`, `assert` (before Python 3.14), `with`, `class`, closures (an inner function/lambda using the outer function's variables), `a, *b = x`, `global`, `:=` in a top-level comprehension, `yield from`, `match` with sequence/mapping/class patterns, annotated assignments. |
 | E102 | save | Forbidden name: any name or attribute containing `__` (also `my__var`), `mro`, `f_globals`, …, and a docstring as the first statement (`__doc__`). String literals are fine. |
 | E201 | runtime | Name not in the context or builtins: `type`, `getattr`, `hasattr`, `print`, `dir`, `ValueError`, `KeyError`, … |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
 | W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
+| W220 | future | saas-19.3+/20.0 with the default `--unsafe-policy=log`: the same constructs are only logged, but rejected once the server switches to `raise`. |
 | W210 | runtime | `json` needs `base_automation` or `website`, `request` needs `website` (and is unbound in scheduled actions), `payload` needs `base_automation` and an HTTP request (never in scheduled runs). |
 | W301 | data | `env.cr.commit()` / `rollback()` (also via `cr = env.cr`). Commits inside a batch loop of a scheduled action are fine. |
 | W302 | performance | `search`/`search_count`/`read_group`/… per iteration: in loops, in lambdas given to `filtered`/`mapped`/`sorted`, or in a helper called from a loop. `search(..., limit=N)` batches in a `while` loop are fine. |
@@ -110,6 +114,7 @@ modules = ["website", "base_automation"]
 names = ["my_enterprise_helper"]    # extra context names (Enterprise / custom _get_eval_context)
 disable = ["W302"]
 target-python = "3.12"              # quoted; fail if not running on this Python
+unsafe-policy = "raise"             # saas-19.3+/20.0 server option --unsafe-policy (default "log")
 ```
 
 Reading config needs Python 3.11+ (or the `tomli` package on 3.10).

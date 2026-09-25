@@ -1,20 +1,18 @@
 {
- "odoo_version": "18.0",
+ "odoo_version": "saas-17.3",
  "source": {
   "repository": "https://github.com/odoo/odoo",
-  "branch": "18.0",
-  "commit": "2802e2b73a85247a9d0933e655cfb16f7dbba64d",
-  "safe_eval_sha256": "63436ca7fb6931f3c740efb0d3b39349926efb79fc2d2875c85ef6a68972cfd0"
+  "branch": "saas-17.3",
+  "commit": "e1fb54cb3d5db9c906946fa11ff49c1ca86d3722",
+  "safe_eval_sha256": "741d9ba6b031b30a65260c9e37e401f0961d753d43d0cc96e318875e0c4421d3",
+  "dateutil_version": "2.9.0.post0"
  },
  "python": {
   "min": [
    3,
    10
   ],
-  "max": [
-   3,
-   14
-  ],
+  "max": null,
   "source": "odoo/__init__.py"
  },
  "opcodes": {
@@ -45,10 +43,7 @@
    "SET_UPDATE",
    "COPY",
    "SWAP",
-   "RESUME",
-   "RETURN_CONST",
-   "TO_BOOL",
-   "LOAD_SMALL_INT"
+   "RESUME"
   ],
   "expr_extra": [
    "UNARY_POSITIVE",
@@ -91,6 +86,7 @@
    "DICT_UPDATE",
    "GEN_START",
    "BINARY_OP",
+   "RETURN_CONST",
    "BINARY_SLICE"
   ],
   "safe_extra": [
@@ -158,22 +154,7 @@
    "LOAD_FAST_CHECK",
    "POP_JUMP_IF_NOT_NONE",
    "POP_JUMP_IF_NONE",
-   "CALL_INTRINSIC_1",
-   "STORE_SLICE",
-   "CALL_KW",
-   "LOAD_FAST_LOAD_FAST",
-   "STORE_FAST_STORE_FAST",
-   "STORE_FAST_LOAD_FAST",
-   "CONVERT_VALUE",
-   "FORMAT_SIMPLE",
-   "FORMAT_WITH_SPEC",
-   "SET_FUNCTION_ATTRIBUTE",
-   "LOAD_FAST_BORROW",
-   "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
-   "POP_ITER",
-   "JUMP_BACKWARD_NO_INTERRUPT",
-   "LOAD_COMMON_CONSTANT",
-   "NOT_TAKEN"
+   "CALL_INTRINSIC_1"
   ]
  },
  "unsafe_attributes": [
@@ -181,7 +162,6 @@
   "f_code",
   "f_globals",
   "f_locals",
-  "f_generator",
   "func_code",
   "func_globals",
   "co_code",
@@ -190,8 +170,7 @@
   "tb_frame",
   "gi_code",
   "gi_frame",
-  "gi_yieldfrom",
-  "cr_await",
+  "g_yieldfromcr_await",
   "cr_code",
   "cr_frame",
   "ag_await",
@@ -248,14 +227,14 @@
    "MINYEAR": null
   },
   "dateutil": {
-   "tz": [
-    "UTC",
-    "tzutc",
-    "gettz"
-   ],
    "parser": [
+    "parse",
+    "parser",
+    "parserinfo",
     "isoparse",
-    "parse"
+    "isoparser",
+    "ParserError",
+    "UnknownTimezoneWarning"
    ],
    "relativedelta": [
     "relativedelta",
@@ -285,6 +264,24 @@
     "FR",
     "SA",
     "SU"
+   ],
+   "tz": [
+    "tzutc",
+    "tzoffset",
+    "tzlocal",
+    "tzfile",
+    "tzrange",
+    "tzstr",
+    "tzical",
+    "tzwin",
+    "tzwinlocal",
+    "gettz",
+    "enfold",
+    "datetime_ambiguous",
+    "datetime_exists",
+    "resolve_imaginary",
+    "UTC",
+    "DeprecatedTzFormatWarning"
    ]
   },
   "time": {
@@ -294,7 +291,7 @@
    "sleep": null
   }
  },
- "algorithm_fingerprint": "45b2c99b17811b93",
+ "algorithm_fingerprint": "3c95f6d6c6c3d08d",
  "context": {
   "core": [
    "uid",

@@ -1,21 +1,21 @@
 {
- "odoo_version": "18.0",
+ "odoo_version": "saas-19.2",
  "source": {
   "repository": "https://github.com/odoo/odoo",
-  "branch": "18.0",
-  "commit": "2802e2b73a85247a9d0933e655cfb16f7dbba64d",
-  "safe_eval_sha256": "63436ca7fb6931f3c740efb0d3b39349926efb79fc2d2875c85ef6a68972cfd0"
+  "branch": "saas-19.2",
+  "commit": "eedfac225740e62346949a25538a05b5e67ca542",
+  "safe_eval_sha256": "1622defd8527be34ba82d97abc0f6840c07fef74821678ab3ae67e63887c42ff"
  },
  "python": {
   "min": [
    3,
-   10
+   12
   ],
   "max": [
    3,
    14
   ],
-  "source": "odoo/__init__.py"
+  "source": "odoo/release.py"
  },
  "opcodes": {
   "blacklist": [
@@ -294,7 +294,7 @@
    "sleep": null
   }
  },
- "algorithm_fingerprint": "45b2c99b17811b93",
+ "algorithm_fingerprint": "a276704f432811db",
  "context": {
   "core": [
    "uid",

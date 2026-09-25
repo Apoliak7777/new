@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 import types
 
-from . import engine
+from . import engine, profile as profiles
 from .engine import Diagnostic
 
 QUERY_METHODS = {"search", "search_read", "search_count", "search_fetch", "_search", "read_group", "_read_group",
@@ -83,7 +83,7 @@ def cr_commit(tree: ast.Module, caller: str, version: str) -> list[Diagnostic]:
             if _in_loop(node, parents, called_in_loop):
                 continue  # batch commits in a scheduled action are Odoo's own pattern
             msg = ("cr.commit() outside a batch loop: Odoo commits when the scheduled action ends; "
-                   + ("for batches use env['ir.cron']._commit_progress(n)" if float(version) >= 19
+                   + ("for batches use env['ir.cron']._commit_progress(n)" if profiles.version_key(version) >= (19, 0)
                       else "commit only between batches"))
         else:
             msg = "cr.commit() inside a server action: a later error leaves partial data committed; let Odoo commit"

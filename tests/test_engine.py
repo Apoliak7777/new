@@ -176,3 +176,17 @@ def test_module_annotation_line_ignores_function_annotations():
 def test_hoisted_cell_of_inlined_comprehension_keeps_its_line():
     code = "partners = records.mapped('partner_id')\ngroups = [records.filtered(lambda r: r.partner_id == p) for p in partners]\n"
     assert {line for line, _ in codes(code)} == {2}
+
+
+def test_sandbox_rules_follow_the_policy():
+    bare = "try:\n    x = 1\nexcept:\n    x = 2\nasync def f():\n    pass"
+    assert codes(bare, version="19.0") == []  # no sandbox before saas-19.3
+    assert codes(bare, version="saas-19.3") == [(3, "W220"), (5, "W220")]
+    assert [(d.line, d.code) for d in lint_code(bare, "20.0", unsafe_policy="raise")] == [(3, "E004"), (5, "E004")]
+    assert lint_code(bare, "20.0", unsafe_policy="disable") == []
+    assert codes("try:\n    x = 1\nexcept Exception:\n    x = 2", version="20.0") == []
+
+
+def test_sandbox_context_names():
+    assert codes("x = BinaryBytes", version="saas-19.3") == []
+    assert codes("x = BinaryBytes", version="19.0") == [(1, "E201")]

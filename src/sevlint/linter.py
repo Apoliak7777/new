@@ -10,7 +10,7 @@ from . import engine, profile as profiles, rules, sources
 
 INLINE_DISABLE_RE = re.compile(r"#\s*sevlint:\s*disable(?:=(?P<codes>[\w,]+))?")
 DEFAULT_VERSION = "19.0"
-SAVE_TIME_CODES = ("E001", "E101", "E102")
+SAVE_TIME_CODES = ("E001", "E004", "E101", "E102")
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class Options:
     names: frozenset[str] = frozenset()
     disabled: frozenset[str] = frozenset()
     all_py: bool = False
+    unsafe_policy: str | None = None  # 19.3+ sandbox; None: the version's default
 
 
 @dataclass(frozen=True)
@@ -74,13 +75,13 @@ def _list_bound(binding: str | None, version: str) -> bool:
     if not binding:
         return False
     view_types = {v.strip() for v in binding.split(",")}
-    return "list" in view_types or ("kanban" in view_types and float(version) >= 19)
+    return "list" in view_types or ("kanban" in view_types and profiles.version_key(version) >= (19, 0))
 
 
 def lint_code(code: str, version: str, caller: str = "server_action", *,
               modules: frozenset[str] = frozenset(), names: frozenset[str] = frozenset(),
               disabled: frozenset[str] = frozenset(), binding: str | None = None,
-              runtime_checks: bool = True) -> list[engine.Diagnostic]:
+              runtime_checks: bool = True, unsafe_policy: str | None = None) -> list[engine.Diagnostic]:
     """Lint one piece of server action code; lines are relative to ``code``.
 
     ``binding`` is the action's binding_view_types when it is offered in the Action menu
@@ -92,6 +93,7 @@ def lint_code(code: str, version: str, caller: str = "server_action", *,
     diags = list(analysis.diagnostics)
     try:
         diags += engine.check_save_time(analysis, prof)
+        diags += engine.check_sandbox(analysis, prof, unsafe_policy)
         if runtime_checks:
             diags += engine.check_names(analysis, prof, modules, names, caller)
             if analysis.tree is not None:
@@ -126,7 +128,8 @@ def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str)
                       names=opts.names | snippet.names,
                       disabled=disabled,
                       binding=snippet.binding,
-                      runtime_checks=not snippet.save_time_only)
+                      runtime_checks=not snippet.save_time_only,
+                      unsafe_policy=opts.unsafe_policy)
     findings = [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
                         version, caller, snippet.label) for d in diags]
     for line, code, severity, message in snippet.source_findings:

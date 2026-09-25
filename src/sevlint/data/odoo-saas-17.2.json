@@ -1,10 +1,10 @@
 {
- "odoo_version": "18.0",
+ "odoo_version": "saas-17.2",
  "source": {
   "repository": "https://github.com/odoo/odoo",
-  "branch": "18.0",
-  "commit": "2802e2b73a85247a9d0933e655cfb16f7dbba64d",
-  "safe_eval_sha256": "63436ca7fb6931f3c740efb0d3b39349926efb79fc2d2875c85ef6a68972cfd0"
+  "branch": "saas-17.2",
+  "commit": "f55cd308379ded0fb0948634632ca187871b4161",
+  "safe_eval_sha256": "ead101b288ee099e88124be1cfbf19fcadd2c25c1cf5a9317470c2c9e687d083"
  },
  "python": {
   "min": [
@@ -13,7 +13,7 @@
   ],
   "max": [
    3,
-   14
+   12
   ],
   "source": "odoo/__init__.py"
  },
@@ -47,8 +47,7 @@
    "SWAP",
    "RESUME",
    "RETURN_CONST",
-   "TO_BOOL",
-   "LOAD_SMALL_INT"
+   "TO_BOOL"
   ],
   "expr_extra": [
    "UNARY_POSITIVE",
@@ -167,13 +166,7 @@
    "CONVERT_VALUE",
    "FORMAT_SIMPLE",
    "FORMAT_WITH_SPEC",
-   "SET_FUNCTION_ATTRIBUTE",
-   "LOAD_FAST_BORROW",
-   "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
-   "POP_ITER",
-   "JUMP_BACKWARD_NO_INTERRUPT",
-   "LOAD_COMMON_CONSTANT",
-   "NOT_TAKEN"
+   "SET_FUNCTION_ATTRIBUTE"
   ]
  },
  "unsafe_attributes": [
@@ -181,7 +174,6 @@
   "f_code",
   "f_globals",
   "f_locals",
-  "f_generator",
   "func_code",
   "func_globals",
   "co_code",
@@ -190,8 +182,7 @@
   "tb_frame",
   "gi_code",
   "gi_frame",
-  "gi_yieldfrom",
-  "cr_await",
+  "g_yieldfromcr_await",
   "cr_code",
   "cr_frame",
   "ag_await",
@@ -294,7 +285,7 @@
    "sleep": null
   }
  },
- "algorithm_fingerprint": "45b2c99b17811b93",
+ "algorithm_fingerprint": "3c95f6d6c6c3d08d",
  "context": {
   "core": [
    "uid",

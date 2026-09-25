@@ -14,7 +14,8 @@ except ModuleNotFoundError:  # Python 3.10
     except ModuleNotFoundError:
         tomllib = None  # type: ignore[assignment]
 
-KEYS = {"odoo", "caller", "modules", "names", "disable", "target-python"}
+KEYS = {"odoo", "caller", "modules", "names", "disable", "target-python", "unsafe-policy"}
+UNSAFE_POLICIES = ("disable", "log", "raise", "terminate")
 
 
 class ConfigError(ValueError):
@@ -54,6 +55,8 @@ def load(path: Path) -> dict:
         if not (isinstance(value, str) and re.fullmatch(r"\d+\.\d+", value)):
             raise ConfigError(f"{path}: 'target-python' must be a quoted version like \"3.12\" "
                               f"(an unquoted 3.10 is the float 3.1)")
+    if "unsafe-policy" in data and data["unsafe-policy"] not in UNSAFE_POLICIES:
+        raise ConfigError(f"{path}: 'unsafe-policy' must be one of {', '.join(UNSAFE_POLICIES)}")
     if "caller" in data and data["caller"] not in CALLERS:
         raise ConfigError(f"{path}: 'caller' must be one of {', '.join(CALLERS)}")
     if "odoo" in data:

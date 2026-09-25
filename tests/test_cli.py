@@ -1,4 +1,5 @@
 import io
+import re
 import json
 import sys
 
@@ -101,7 +102,7 @@ def test_explain_and_versions(capsys):
     code, out, _ = run(["explain", "e101"], capsys=capsys)
     assert code == 0 and out.startswith("E101:")
     code, out, _ = run(["versions"], capsys=capsys)
-    assert code == 0 and "19.0  odoo/odoo@" in out
+    assert code == 0 and re.search(r"^19\.0 +odoo/odoo@", out, re.M) and "saas-19.3" in out
 
 
 def _needs_toml():
@@ -183,3 +184,22 @@ def test_stdin_is_read_as_utf8(capsys, monkeypatch):
     code = cli.main(["check", "-"])
     out, _ = capsys.readouterr()
     assert code == 1 and "<stdin>:2: E101" in out
+
+
+def test_saas_version_and_unsafe_policy_flags(capsys, monkeypatch):
+    code, out, _ = run(["check", "-", "--odoo", "19.3", "--unsafe-policy", "raise", "--format", "json"],
+                       "try:\n    x = 1\nexcept:\n    pass\n", monkeypatch, capsys)
+    data = json.loads(out)
+    assert code == 1 and data["findings"][0]["code"] == "E004" and data["findings"][0]["odoo_version"] == "saas-19.3"
+
+
+def test_unsafe_policy_config_validation(tmp_path, capsys, monkeypatch):
+    _needs_toml()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "x.py").write_text("# sevlint: odoo=20.0\ntry:\n    x = 1\nexcept:\n    pass\n")
+    (tmp_path / ".sevlint.toml").write_text('unsafe-policy = "strict"\n')
+    code, _, err = run(["check", "x.py"], capsys=capsys)
+    assert code == 2 and "unsafe-policy" in err
+    (tmp_path / ".sevlint.toml").write_text('unsafe-policy = "raise"\n')
+    code, out, _ = run(["check", "x.py"], capsys=capsys)
+    assert code == 1 and "E004" in out

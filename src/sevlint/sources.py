@@ -343,7 +343,8 @@ def manifest_version(path: Path) -> str | None:
     if manifest is None:
         return None
     parts = str(_read_manifest(manifest).get("version", "")).split(".")
-    if len(parts) >= 4 and parts[0].isdigit() and int(parts[0]) >= 10:
+    # Only a stable series prefix ('19.0.1.0.0'); '17.1.0.0' is more likely a module version.
+    if len(parts) >= 4 and parts[0].isdigit() and int(parts[0]) >= 10 and parts[1] == "0":
         return normalize_version(".".join(parts[:2]))
     return None
 

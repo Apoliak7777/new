@@ -35,9 +35,8 @@ def _python_problem(versions: set[str], target: str | None) -> str | None:
     for version in sorted(versions):
         prof = profiles.load(version)
         if not prof.python_supported:
-            lo, hi = ".".join(map(str, prof.python_min)), ".".join(map(str, prof.python_max))
-            return (f"the hook runs on Python {running}, outside Odoo {version}'s {lo}-{hi}; verdicts may be wrong "
-                    f"(set SEVLINT_PYTHON)")
+            return (f"the hook runs on Python {running}, outside Odoo {version}'s {prof.python_range}; verdicts may "
+                    f"be wrong (set SEVLINT_PYTHON)")
     return None
 
 
@@ -102,7 +101,8 @@ def claude_post_tool_use(stdin, stderr) -> int:
                 return BLOCKING_EXIT
         except OSError as err:
             notes.append(f"sevlint: {cfg_path} ignored: {err}")
-    no_flags = argparse.Namespace(odoo=None, caller=None, modules="", names="", disable="", all_py=False)
+    no_flags = argparse.Namespace(odoo=None, caller=None, modules="", names="", disable="", all_py=False,
+                                  unsafe_policy=None)
     try:
         report = lint_paths([str(path)], options_from(no_flags, cfg))
     except ValueError:
