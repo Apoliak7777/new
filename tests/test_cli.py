@@ -102,3 +102,45 @@ def test_explain_and_versions(capsys):
     assert code == 0 and out.startswith("E101:")
     code, out, _ = run(["versions"], capsys=capsys)
     assert code == 0 and "19.0  odoo/odoo@" in out
+
+
+def _needs_toml():
+    pytest.importorskip("tomllib" if sys.version_info >= (3, 11) else "tomli")
+
+
+def test_config_is_found_per_linted_path(tmp_path, capsys, monkeypatch):
+    _needs_toml()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / ".sevlint.toml").write_text('names = ["foo"]\n')
+    (tmp_path / "a" / "x.py").write_text("# sevlint:\nx = foo\n")
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "y.py").write_text("# sevlint:\nx = foo\n")
+    code, out, _ = run(["check", "a/x.py", "b/y.py"], capsys=capsys)
+    assert code == 1 and "a/x.py" not in out and "b/y.py:2: E201" in out
+
+
+def test_invalid_toml_and_values_exit_2(tmp_path, capsys, monkeypatch):
+    _needs_toml()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "x.py").write_text("# sevlint:\nx = 1\n")
+    for text, needle in (("odoo = \n", "invalid TOML"), ("target-python = 3.10\n", "quoted version"),
+                         ('caller = "scheduled"\n', "'caller' must be"), ('odoo = "12.0"\n', "unsupported")):
+        (tmp_path / ".sevlint.toml").write_text(text)
+        code, _, err = run(["check", "x.py"], capsys=capsys)
+        assert code == 2 and needle in err, text
+
+
+def test_github_escaping(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data,v2").mkdir()
+    (tmp_path / "data,v2" / "a:b.py").write_text("# sevlint:\nimport os\n")
+    code, out, _ = run(["check", "data,v2", "--format", "github"], capsys=capsys)
+    assert code == 1 and out.startswith("::error file=data%2Cv2/a%3Ab.py,line=2,title=sevlint E101::")
+
+
+def test_notes_do_not_fail(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "icon.svg").write_text("<svg/>")
+    code, _, err = run(["check", "icon.svg"], capsys=capsys)
+    assert code == 0 and "skipped" in err

@@ -11,8 +11,9 @@ from .linter import Options, Report, lint_paths, lint_text
 from .profile import CALLERS
 
 RULES = {
-    "E001": "Syntax error. Odoo compiles `code.strip()` in exec mode, so an indented first line "
-            "or a stray indent is an IndentationError. Rejected when saving.",
+    "E001": "Syntax error (or code too long/deep for the compiler). Odoo compiles `code.strip()` in exec "
+            "mode: strip() removes only the first line's indentation, so an indented block is an "
+            "IndentationError. Rejected when saving.",
     "E101": "Forbidden opcode. The construct compiles to bytecode outside Odoo's _SAFE_OPCODES "
             "(import, `obj.attr = x`, `del d[k]`, assert, with, class, closures, a, *b = ...). "
             "Depends on the Python version Odoo runs on. Rejected when saving.",
@@ -23,15 +24,21 @@ RULES = {
             "Common cases: type, getattr, hasattr, print, ValueError, KeyError.",
     "E202": "Attribute not exposed by a wrapped module (datetime, dateutil, time). "
             "AttributeError at runtime, e.g. time.mktime or dateutil.easter.",
+    "W100": "XML: text after a comment or child element inside <field name=\"code\"> is dropped by Odoo "
+            "(it stores node.text only).",
     "W210": "Name provided only by an addon (json: base_automation/website, request: website, "
-            "payload: base_automation webhooks). Declare installed modules with --modules or config.",
-    "W301": "env.cr.commit()/rollback() inside a server action: breaks atomicity of the action.",
-    "W302": "ORM query method (search, search_count, read_group, ...) inside a loop: one query per iteration.",
-    "W303": "raise UserError after write/create/unlink: the exception rolls the transaction back. "
-            "Fine for an intentional dry run (disable with `# sevlint: disable=W303`).",
+            "payload: base_automation + an HTTP request, never in scheduled runs). Declare installed modules "
+            "with --modules or config.",
+    "W301": "env.cr.commit()/rollback() inside a server action: breaks atomicity of the action. "
+            "Commits inside a loop of a scheduled action (batching) are not reported.",
+    "W302": "ORM query method (search, search_count, read_group, ...) inside a loop, a per-record lambda "
+            "(filtered/mapped/sorted) or a helper called from one: one query per iteration. "
+            "`search(..., limit=N)` in a while loop (batching) is not reported.",
+    "W303": "raise UserError after write/create/unlink on the same path: the exception rolls the transaction "
+            "back. Fine for an intentional dry run (disable with `# sevlint: disable=W303`).",
     "W304": "record/records in a scheduled action (ir.cron): both are None there.",
-    "W305": "`record` without `records` in an action offered in list views (binding_view_types contains "
-            "'list'): the code runs once, `record` is the first selected record, the rest is ignored.",
+    "W305": "`record` without `records` in an action offered in list views (or kanban views on 19.0+): "
+            "the code runs once, `record` is the first selected record, the rest is ignored.",
     "W306": "raise Exception(...): safe_eval re-raises it as ValueError, the user sees a server error "
             "with traceback. Raise UserError for a message.",
 }
@@ -80,11 +87,20 @@ def options_from(args: argparse.Namespace, cfg: dict) -> Options:
     )
 
 
+def _escape_data(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_property(text: str) -> str:
+    return _escape_data(text).replace(":", "%3A").replace(",", "%2C")
+
+
 def render(report: Report, fmt: str) -> str:
     if fmt == "json":
         return json.dumps({
             "findings": [f.__dict__ for f in report.findings],
             "problems": report.problems,
+            "notes": report.notes,
             "summary": {"errors": report.errors, "warnings": report.warnings,
                         "snippets": report.snippets, "files": report.files},
         }, indent=1)
@@ -93,8 +109,9 @@ def render(report: Report, fmt: str) -> str:
         where = f"{f.odoo_version} {f.caller}" + (f" {f.label}" if f.label else "")
         if fmt == "github":
             level = "error" if f.severity == "error" else "warning"
-            msg = f"{f.code} {f.message} [{where}]".replace("%", "%25").replace("\n", "%0A")
-            lines.append(f"::{level} file={f.path},line={f.line},title=sevlint {f.code}::{msg}")
+            lines.append(f"::{level} file={_escape_property(f.path)},line={f.line},"
+                         f"title={_escape_property('sevlint ' + f.code)}::"
+                         f"{_escape_data(f'{f.code} {f.message} [{where}]')}")
         else:
             lines.append(f"{f.path}:{f.line}: {f.code} {f.message} [{where}]")
     return "\n".join(lines)
@@ -104,7 +121,7 @@ def _python_notes(report: Report, target: str | None) -> list[str]:
     notes = []
     running = "%d.%d" % sys.version_info[:2]
     if target and target != running:
-        notes.append(f"error: --target-python {target} but running {running}; "
+        notes.append(f"error: target-python {target} but running {running}; "
                      f"run e.g. `uvx --python {target} sevlint ...` (opcodes differ between Python versions)")
     for version in sorted(report.versions):
         prof = profiles.load(version)
@@ -114,30 +131,47 @@ def _python_notes(report: Report, target: str | None) -> list[str]:
     return notes
 
 
+class _Configs:
+    """Nearest config for each linted path (like the Claude hook), loaded once."""
+
+    def __init__(self, explicit: Path | None):
+        self.explicit = explicit
+        self.cache: dict[Path, dict] = {}
+
+    def for_path(self, path: Path) -> tuple[Path | None, dict]:
+        found = self.explicit or config.find(path)
+        if found is None:
+            return None, {}
+        if found not in self.cache:
+            self.cache[found] = config.load(found)
+        return found, self.cache[found]
+
+
 def cmd_check(args: argparse.Namespace) -> int:
-    cfg: dict = {}
-    cfg_path = args.config or config.find(Path.cwd())
-    if cfg_path is not None:
-        try:
-            cfg = config.load(cfg_path)
-        except (config.ConfigError, OSError) as err:
-            print(f"sevlint: {err}", file=sys.stderr)
-            return 2
-    opts = options_from(args, cfg)
+    configs = _Configs(args.config)
+    report = Report()
+    targets: set[str] = set()
     try:
+        if args.odoo:
+            profiles.load(args.odoo)  # fail fast on a bad --odoo
         if args.paths == ["-"]:
+            _, cfg = configs.for_path(Path.cwd())
+            opts = _checked_options(args, cfg)
+            targets.add(cfg.get("target-python", ""))
             report = lint_text(sys.stdin.read(), "<stdin>", opts)
         else:
-            report = lint_paths(args.paths, opts)
-    except ValueError as err:  # unknown Odoo version
+            for raw in args.paths:
+                _, cfg = configs.for_path(Path(raw).absolute())
+                targets.add(cfg.get("target-python", ""))
+                report.merge(lint_paths([raw], _checked_options(args, cfg)))
+    except (config.ConfigError, OSError, ValueError) as err:
         print(f"sevlint: {err}", file=sys.stderr)
         return 2
     output = render(report, args.format)
     if output:
         print(output)
-    target = args.target_python or cfg.get("target-python")
-    notes = _python_notes(report, target)
-    for line in report.problems + notes:
+    target = args.target_python or next((t for t in sorted(targets) if t), None)
+    for line in report.problems + report.notes + _python_notes(report, target):
         print(f"sevlint: {line}", file=sys.stderr)
     if args.format == "text":
         print(f"sevlint: {report.errors} error(s), {report.warnings} warning(s) in {report.snippets} snippet(s) "
@@ -147,6 +181,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     if report.errors or (args.strict and report.warnings) or report.problems:
         return 1
     return 0
+
+
+def _checked_options(args: argparse.Namespace, cfg: dict) -> Options:
+    opts = options_from(args, cfg)
+    if opts.odoo:
+        profiles.load(opts.odoo)  # ValueError -> exit 2 for a bad config value
+    return opts
 
 
 def cmd_explain(args: argparse.Namespace) -> int:

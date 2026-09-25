@@ -14,43 +14,46 @@ examples/snippet.py:7: E202 `time.mktime` is not exposed by Odoo's wrapped `time
 ...
 ```
 
-* **Offline, no dependencies**: stdlib only. No Odoo installation, database or API key needed.
+* **Offline, no dependencies**: stdlib only. No Odoo installation, database, server or API key.
 * **Same verdict as Odoo**: the save-time check re-implements `_check_python_code` →
   `test_python_expr(code.strip(), "exec")` with data extracted from Odoo's own `safe_eval.py`
   for 17.0, 18.0 and 19.0. The test suite compares every verdict with the real `safe_eval.py`.
 * **Beyond Odoo's own check**: undefined names, attributes that wrapped modules do not expose,
-  and a handful of common bugs (N+1 queries, `cr.commit()`, rollback by `UserError`, `records` in crons).
+  and common bugs (N+1 queries, `cr.commit()`, rollback by `UserError`, `records` in crons).
 
-## Install / run
+## Try it
 
 ```bash
-# one-off, no install (uv)
+# no install, needs uv (https://docs.astral.sh/uv/)
 uvx --from git+https://github.com/Apoliak7777/new sevlint check path/to/addons
 
-# or install
+# or install with pip (Python 3.10+)
 pip install git+https://github.com/Apoliak7777/new
-sevlint check my_module/
+sevlint check path/to/addons
 ```
 
-Paste code from the Odoo UI straight in:
+The repository contains a deliberately broken demo module: `sevlint check examples` reports 8 errors
+and 5 warnings. Code copied from the Odoo UI can be piped in:
 
 ```bash
-pbpaste | sevlint check - --odoo 18.0 --caller cron
+pbpaste | sevlint check - --odoo 18.0 --caller cron            # macOS
+Get-Clipboard | sevlint check - --odoo 18.0 --caller cron      # Windows PowerShell
 ```
 
 `sevlint versions` lists the supported Odoo series, `sevlint explain E101` describes a rule.
+Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input), 2 usage/config error.
 
 ## What gets linted
 
 | Input | How |
 | --- | --- |
-| `*.xml` module data | `<record>` of `ir.actions.server`, `ir.cron`, `base.automation` with a `code` field (skipped if `state` is not `code`). The caller comes from the model; `base_automation_id` means automation. |
-| `*.py` with a header | Any file whose first 10 lines contain `# sevlint: ...`. Other `.py` files are ignored unless you pass `--all-py`. |
+| `*.xml` module data | Every `<record>` of `ir.actions.server`, `ir.cron`, `base.automation` with a `code` field, including records nested in `action_server_ids`. `eval="'...'"` values are understood. The code is read the way Odoo stores it (text before the first comment/child element; the last `code` field wins). If `state` is not `code`, only the save-time checks run: Odoo validates the code of every action anyway. |
+| `*.py` with a header | Files whose leading comment block (first 10 lines) contains `# sevlint: ...`. Other `.py` files are ignored unless you pass `--all-py`. |
 | stdin | `sevlint check -` (the header is optional) |
 
 The Odoo series comes from the header, then the nearest `__manifest__.py` (`19.0.x.y.z`), then
-`--odoo`/config, then defaults to `19.0`. Installed modules are taken from the manifest's
-`depends`, followed through sibling modules in the same addons directory.
+`--odoo`/config, then defaults to `19.0`. Installed modules are the module itself plus its
+`depends`, followed through sibling modules of the same addons directory (symlinked modules too).
 
 Header keys (all optional):
 
@@ -62,21 +65,22 @@ Header keys (all optional):
 
 | Code | When it hurts | What |
 | --- | --- | --- |
-| E001 | save | Syntax error. Odoo strips the code, so an indented first line is an `IndentationError`. |
-| E101 | save | Forbidden opcode: `import`, `obj.attr = x`, `del d[k]`, `assert`, `with`, `class`, closures, `a, *b = x`, `global`, `:=` in a top-level comprehension, `yield from`, `match` with sequence/mapping/class patterns, annotations. |
+| E001 | save | Syntax error, or code too long/deep for the compiler. `strip()` removes only the first line's indentation, so an indented block is an `IndentationError`. |
+| E101 | save | Forbidden opcode: `import`, `obj.attr = x`, `del d[k]`, `assert` (before Python 3.14), `with`, `class`, closures (an inner function/lambda using the outer function's variables), `a, *b = x`, `global`, `:=` in a top-level comprehension, `yield from`, `match` with sequence/mapping/class patterns, annotated assignments. |
 | E102 | save | Forbidden name: any name or attribute containing `__` (also `my__var`), `mro`, `f_globals`, …, and a docstring as the first statement (`__doc__`). String literals are fine. |
 | E201 | runtime | Name not in the context or builtins: `type`, `getattr`, `hasattr`, `print`, `dir`, `ValueError`, `KeyError`, … |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
-| W210 | runtime | `json`/`payload` need `base_automation` (`json` also comes with `website`), `request` needs `website`. |
-| W301 | data | `env.cr.commit()` / `rollback()` inside the action. |
-| W302 | performance | `search`/`search_count`/`read_group`/… inside a loop. |
-| W303 | data | `raise UserError` after `write`/`create`/`unlink`/…: everything is rolled back. |
+| W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
+| W210 | runtime | `json` needs `base_automation` or `website`, `request` needs `website`, `payload` needs `base_automation` and an HTTP request (never in scheduled runs). |
+| W301 | data | `env.cr.commit()` / `rollback()` (also via `cr = env.cr`). Commits inside a batch loop of a scheduled action are fine. |
+| W302 | performance | `search`/`search_count`/`read_group`/… per iteration: in loops, in lambdas given to `filtered`/`mapped`/`sorted`, or in a helper called from a loop. `search(..., limit=N)` batches in a `while` loop are fine. |
+| W303 | data | `raise UserError` after `write`/`create`/`unlink`/… on the same path: everything is rolled back. |
 | W304 | runtime | `record`/`records` in a scheduled action: both are `None` there. |
-| W305 | logic | `record` without `records` in an action offered in list views: only the first selected record is processed. |
-| W306 | UX | `raise Exception(...)`: the user gets a server error; raise `UserError`. |
+| W305 | logic | `record` without `records` in an action offered in list views (kanban too on 19.0): only the first selected record is processed. |
+| W306 | UX | `raise Exception(...)` not caught locally: the user gets a server error; raise `UserError`. |
 
 Suppress on one line with `# sevlint: disable=W302` (or bare `# sevlint: disable`), for a whole
-run with `--disable W302,W303`, or all warnings with `--disable W*`.
+file with the header `disable=`, for a run with `--disable W302,W303`, or all warnings with `--disable W*`.
 
 ## Python version matters
 
@@ -95,7 +99,8 @@ and set `target-python` so a mismatch fails loudly instead of giving a wrong ver
 
 ## Configuration
 
-`pyproject.toml` (or a top-level `.sevlint.toml`):
+`pyproject.toml` (or a `.sevlint.toml` with the same keys at top level). The nearest config above
+each path given on the command line is used; `--config` forces one.
 
 ```toml
 [tool.sevlint]
@@ -103,8 +108,10 @@ odoo = "18.0"                       # when no header / manifest says otherwise
 modules = ["website", "base_automation"]
 names = ["my_enterprise_helper"]    # extra context names (Enterprise / custom _get_eval_context)
 disable = ["W302"]
-target-python = "3.12"              # fail if not running on this Python
+target-python = "3.12"              # quoted; fail if not running on this Python
 ```
+
+Reading config needs Python 3.11+ (or the `tomli` package on 3.10).
 
 ## Integrations
 
@@ -113,7 +120,7 @@ target-python = "3.12"              # fail if not running on this Python
 ```yaml
 repos:
   - repo: https://github.com/Apoliak7777/new
-    rev: main  # pin a tag or commit SHA
+    rev: <tag or commit SHA>   # pre-commit does not accept branch names
     hooks:
       - id: sevlint
 ```
@@ -121,7 +128,7 @@ repos:
 ### GitHub Actions
 
 ```yaml
-- uses: actions/setup-python@v6
+- uses: actions/setup-python@v7
   with: {python-version: "3.12"}
 - run: pipx run --spec git+https://github.com/Apoliak7777/new sevlint check . --format github
 ```
@@ -129,15 +136,20 @@ repos:
 ### Claude Code plugin
 
 The repository is also a Claude Code plugin marketplace. After every `Write`/`Edit` of a `.py`/`.xml`
-file the plugin's hook lints the file and returns the findings to Claude, and a skill tells Claude
-the rules of server action code up front.
+file the plugin's hook lints that file and returns the findings to Claude (exit 2, so Claude sees them
+and fixes the code), and a skill tells Claude the rules of server action code up front.
 
 ```
 /plugin marketplace add Apoliak7777/new
 /plugin install sevlint@sevlint
 ```
 
-The hook runs `python3` from the plugin directory (no install, no network). It stays silent for
+To try a local checkout without installing: `claude --plugin-dir path/to/this/repo`.
+
+The hook runs from the plugin directory with no install and no network. `hooks/run.sh` picks the
+first working Python 3.10+ among `$SEVLINT_PYTHON`, `python3`, `python`, `py` (so the Windows Store
+`python3` alias is skipped). On Windows it needs Git Bash, which Claude Code uses for hook commands.
+Set `SEVLINT_PYTHON` to use the same Python version as your Odoo server. The hook stays silent for
 files without server action code.
 
 ## How it stays correct
@@ -147,11 +159,13 @@ files without server action code.
   `ir.actions.server` **from the AST** (never imports Odoo), writes `src/sevlint/data/odoo-*.json` and
   vendors `safe_eval.py` into `tests/fixtures/`. Anything it does not recognise aborts the sync.
 * `tests/test_oracle.py` loads the vendored `safe_eval.py` (imports stubbed) and asserts, on every
-  Python version in CI, that the opcode set, builtins and wrapped modules are identical, and that
-  sevlint rejects exactly the snippets Odoo rejects.
-* A weekly workflow re-runs the sync against the Odoo branches and fails when upstream changes.
-* Checked against every server action and cron shipped in Odoo Community 17.0/18.0/19.0
-  (168/227/235 snippets): 0 findings.
+  Python version in CI (3.10–3.14), that the opcode set, builtins and wrapped modules are identical,
+  and that sevlint rejects exactly the snippets Odoo rejects.
+* A weekly workflow checks the data against the Odoo branches (`--check`) and lints every server
+  action shipped with Odoo Community as a false-positive regression test.
+* Current results: 0 findings on the server actions and crons in Odoo Community 17.0/18.0/19.0
+  (174/233/242 snippets from data, views, wizard and report XML) and on 40 snippets from eight OCA
+  17.0 repositories.
 
 ## Limitations
 

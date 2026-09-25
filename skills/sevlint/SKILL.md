@@ -26,17 +26,18 @@ The plugin hook does this automatically after each Write/Edit.
 ## Rejected when saving
 - `import` / `from ... import`.
 - Attribute assignment `record.x = v` / `record.x += 1` / `del record.x`: use `record.write({'x': v})`.
-- `del d[k]` (use `d.pop(k)`), `assert`, `with`, `class`, `global`, `a, *b = x`, `yield from`,
+- `del d[k]` (use `d.pop(k)`), `assert` (Python ≤ 3.13), `with`, `class`, `global`, `a, *b = x`, `yield from`,
   `match` with sequence/mapping/class patterns, annotated assignments at top level.
 - Any name or attribute containing `__` anywhere (`__class__`, `my__var`) or named `mro`, `f_globals`,
   `gi_frame`, …. String literals with `__` are fine (`'__TEST__'` is OK).
 - A string as the first statement (docstring → `__doc__`). Use `#` comments.
-- Closures: an inner function or lambda using a variable of its enclosing function. On Python ≤ 3.11
+- Closures: an inner function or lambda using a variable of its enclosing function, e.g.
+  `def f(v): return recs.filtered(lambda r: r.x == v)`. On Python ≤ 3.11
   also list/dict/set comprehensions inside a `def` that use the function's locals; generator
   expressions inside a `def` using its locals are rejected on every version. Top-level code is fine:
   top-level names are globals.
 - `:=` inside a comprehension at top level.
-- An indented first line (the code is stripped, the rest keeps its indentation).
+- An indented block: the code is stripped, which removes only the first line's indentation.
 
 ## Behaviour to design for
 - A code action runs once. From a list view `records` = all selected, `record` = only the first one.

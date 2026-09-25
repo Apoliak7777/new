@@ -63,10 +63,13 @@ def test_read_xml_snippets_and_callers():
         ("action_bound_list", "server_action"),
         ("action_bound_form", "server_action"),
         ("action_automation", "automation"),
+        ("action_object_write", "server_action"),
         ("cron_1", "cron"),
     ]
     assert "1 < 2" in snippets[2].code
     assert [s.binding for s in snippets[3:5]] == ["list,form", "form"]
+    # Odoo validates the code of every action on save, whatever its state
+    assert [s.save_time_only for s in snippets] == [False] * 6 + [True, False]
 
 
 def test_xml_line_numbers(tmp_path):
@@ -80,6 +83,7 @@ def test_xml_line_numbers(tmp_path):
     assert "missing_name" in lines[found[("action_entities", "E201")] - 1]
     assert "records.write" in lines[found[("cron_1", "W304")] - 1]
     assert ("action_bound_list", "W305") in found and ("action_bound_form", "W305") not in found
+    assert ("action_object_write", "E101") in found  # save-time check still applies
 
 
 def test_xml_parse_error_and_empty_file():
@@ -128,3 +132,130 @@ def test_manifest_version_and_dependencies(tmp_path):
 def test_manifest_without_series_prefix_is_ignored(tmp_path):
     mod = make_module(tmp_path, "m", "1.0", [])
     assert sources.manifest_version(mod / "data" / "x.xml") is None
+
+
+def _snippets(xml):
+    snippets, problems = sources.read_xml("x.xml", xml.encode())
+    assert problems == []
+    return snippets
+
+
+def test_nested_automation_action_records():
+    xml = """<odoo>
+    <record id="rule" model="base.automation">
+        <field name="name">Rule</field>
+        <field name="action_server_ids">
+            <record id="rule_action" model="ir.actions.server">
+                <field name="state">code</field>
+                <field name="code">record.x = 1</field>
+            </record>
+        </field>
+    </record>
+</odoo>"""
+    (snippet,) = _snippets(xml)
+    assert (snippet.label, snippet.caller, snippet.first_line) == ("rule_action", "automation", 7)
+
+
+def test_eval_attributes():
+    xml = """<odoo>
+    <record id="c" model="ir.cron">
+        <field name="state" eval="'code'"/>
+        <field name="code" eval="'model._run()'"/>
+    </record>
+    <record id="s" model="ir.actions.server">
+        <field name="state" eval="'object_write'"/>
+        <field name="code">x = 1</field>
+    </record>
+    <record id="u" model="ir.actions.server">
+        <field name="binding_model_id" eval="False"/>
+        <field name="code">x = record</field>
+    </record>
+    <record id="v" model="ir.actions.server">
+        <field name="binding_model_id" ref="base.model_res_partner"/>
+        <field name="binding_view_types" eval="'form'"/>
+        <field name="code">x = record</field>
+    </record>
+    <record id="w" model="ir.actions.server">
+        <field name="code" eval="compute_me()"/>
+    </record>
+</odoo>"""
+    snippets = _snippets(xml)
+    assert [(s.label, s.code, s.save_time_only, s.binding) for s in snippets] == [
+        ("c", "model._run()", False, None),
+        ("s", "x = 1", True, None),
+        ("u", "x = record", False, None),
+        ("v", "x = record", False, "form"),
+    ]
+
+
+def test_text_after_comment_is_dropped_like_odoo(tmp_path):
+    xml = """<odoo>
+    <record id="a" model="ir.actions.server">
+        <field name="code">x = 1
+<!-- a comment -->
+import os</field>
+    </record>
+</odoo>"""
+    (snippet,) = _snippets(xml)
+    assert "import os" not in snippet.code and snippet.truncated_at == 5
+    path = tmp_path / "a.xml"
+    path.write_text(xml)
+    assert [(f.line, f.code) for f in lint_paths([str(path)], Options()).findings] == [(5, "W100")]
+
+
+def test_repeated_code_field_last_wins():
+    xml = """<odoo><record id="a" model="ir.actions.server">
+        <field name="code">x = (</field>
+        <field name="code">x = 1</field>
+    </record></odoo>"""
+    (snippet,) = _snippets(xml)
+    assert snippet.code == "x = 1"
+
+
+def test_header_only_in_leading_comment_block():
+    assert sources.parse_header("# comment\n\n# sevlint: odoo=18\nx = 1").odoo == "18.0"
+    assert sources.parse_header("x = 1\n# sevlint: disable=W302\n") is None
+
+
+def test_bom_python_file(tmp_path):
+    path = tmp_path / "sa.py"
+    path.write_bytes("\ufeff# sevlint: odoo=19.0\nimport os\n".encode("utf-8"))
+    report = lint_paths([str(path)], Options())
+    assert [(f.line, f.code) for f in report.findings] == [(2, "E101")]
+
+
+def test_symlinked_modules_are_walked(tmp_path):
+    real = tmp_path / "repo"
+    make_module(real, "website", "17.0.1.0", [])
+    make_module(real, "shop", "17.0.1.0", ["website"])
+    (real / "shop" / "data" / "a.xml").write_text(
+        '<odoo><record id="a" model="ir.actions.server"><field name="code">x = request.x</field></record></odoo>')
+    addons = tmp_path / "addons"
+    addons.mkdir()
+    for name in ("website", "shop"):
+        (addons / name).symlink_to(real / name, target_is_directory=True)
+    (addons / "loop").symlink_to(addons, target_is_directory=True)
+    report = lint_paths([str(addons)], Options())
+    assert report.snippets == 1 and report.findings == [] and report.versions == {"17.0"}
+
+
+def test_unsupported_explicit_file_is_a_note(tmp_path):
+    (tmp_path / "icon.svg").write_text("<svg/>")
+    report = lint_paths([str(tmp_path / "icon.svg")], Options())
+    assert report.problems == [] and report.notes
+
+
+def test_unsupported_version_does_not_abort_the_run(tmp_path):
+    (tmp_path / "a.py").write_text("# sevlint: odoo=16.0\nx = 1\n")
+    (tmp_path / "b.py").write_text("# sevlint: odoo=19.0\nimport os\n")
+    report = lint_paths([str(tmp_path)], Options())
+    assert len(report.problems) == 1 and "unsupported Odoo version" in report.problems[0]
+    assert [f.code for f in report.findings] == ["E101"]
+
+
+def test_unreadable_file_is_a_problem(tmp_path, monkeypatch):
+    path = tmp_path / "a.xml"
+    path.write_text("<odoo/>")
+    monkeypatch.setattr(type(path), "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    report = lint_paths([str(path)], Options())
+    assert report.problems and "cannot read" in report.problems[0]

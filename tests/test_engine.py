@@ -116,3 +116,53 @@ def test_comprehension_closure_accepted_since_312():
 def test_unknown_version():
     with pytest.raises(ValueError, match="unsupported Odoo version"):
         lint_code("x = 1", "12.0")
+
+
+def test_huge_or_deep_code_does_not_crash():
+    for code in ("x = " + "+".join(["1"] * 100000), "x = " + "-" * 200000 + "1", "f = " + "lambda: " * 1200 + "1"):
+        found = codes(code)
+        assert found and found[0][1] == "E001"
+
+
+def test_wrapped_names_shadowed_in_nested_scopes():
+    code = ("def fmt_slot(time):\n    return '%02d:%02d' % (time.hour, time.minute)\n"
+            "hours = [time.hour for time in records.mapped('start')]\n"
+            "f = lambda datetime: datetime.year\n"
+            "def g():\n    dateutil = records[0].x\n    return dateutil.easter\n")
+    assert codes(code) == []
+    assert codes("def g():\n    return time.mktime(1)") == [(2, "E202")]
+
+
+def test_closure_reported_on_function_lines_not_line_1():
+    code = "x = 1\ny = 2\ndef outer(v):\n    return records.filtered(lambda r: r.x == v)\n"
+    lines = {line for line, c in codes(code) if c == "E101"}
+    assert lines and 1 not in lines and lines <= {3, 4}
+
+
+def test_annotation_reported_on_its_line():
+    assert {line for line, _ in codes("x = 1\n\ny: int = 2\n")} == {3}
+
+
+def test_interpreter_flags_do_not_change_verdict(monkeypatch):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert codes("x = '\\d'\ny = x is 1") == []
+    assert (1, "E101") in codes("assert records") or sys.version_info >= (3, 14)
+
+
+def test_form_feed_does_not_shift_inline_disable():
+    assert codes("x = 1\f\ny = foo  # sevlint: disable=E201") == []
+
+
+def test_automation_implies_base_automation():
+    assert codes("x = json.dumps({})", caller="automation") == []
+    assert codes("x = payload", caller="cron", modules=frozenset({"base_automation"})) == [(1, "W210")]
+
+
+def test_annotations_are_lazy_on_314():
+    found = codes("def f(a: Missing) -> Missing2:\n    return a\nx = f(1)")
+    if sys.version_info >= (3, 14):
+        assert found == []
+    else:
+        assert [c for _, c in found] == ["E201", "E201"]

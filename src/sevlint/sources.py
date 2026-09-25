@@ -26,6 +26,8 @@ class Snippet:
     names: frozenset[str] = frozenset()
     disabled: frozenset[str] = frozenset()
     binding: str | None = None  # binding_view_types when offered in the Action menu, e.g. "list,form"
+    save_time_only: bool = False  # state is not 'code': Odoo still validates the code on save
+    truncated_at: int | None = None  # XML: file line of text Odoo drops (after a comment/child element)
 
 
 @dataclass
@@ -44,9 +46,16 @@ def _split_list(value: str) -> frozenset[str]:
 
 
 def parse_header(text: str) -> Header | None:
-    """``# sevlint: odoo=19.0 caller=cron modules=website names=foo,bar disable=W302 binding=list,form``"""
+    """``# sevlint: odoo=19.0 caller=cron modules=website names=foo,bar disable=W302 binding=list,form``
+
+    Only the leading block of comment/blank lines (at most 10 lines) is a header; a
+    ``# sevlint: disable=...`` further down is an inline suppression for its own line.
+    """
     header: Header | None = None
     for line in text.splitlines()[:HEADER_SCAN_LINES]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            break  # first statement ends the header block
         match = HEADER_RE.match(line)
         if not match:
             continue
@@ -92,51 +101,106 @@ def read_python(path: str, text: str, *, require_header: bool) -> tuple[list[Sni
     return [snippet], header.errors
 
 
+class _Field:
+    def __init__(self, name: str | None, attrs: dict, line: int):
+        self.name = name
+        self.attrs = attrs
+        self.start_line = line
+        self.parts: list[str] = []
+        self.text_line: int | None = None  # line where the element text starts
+        self.depth = 0  # open child elements
+        self.closed = False  # a child element or comment was seen: later text is a tail
+        self.truncated_at: int | None = None  # first non-blank tail text (dropped by Odoo)
+
+
+class _Record:
+    def __init__(self, model: str | None, xml_id: str, parent: tuple["_Record", str] | None):
+        self.model = model
+        self.id = xml_id
+        self.parent = parent
+        self.fields: dict[str, _Field] = {}
+        self.current: _Field | None = None
+
+
+_UNKNOWN = object()
+
+
+def _value(fld: _Field | None):
+    """A field's value as odoo/tools/convert.py sees it: text, ref, or a literal ``eval``."""
+    if fld is None:
+        return None
+    if "eval" in fld.attrs:
+        try:
+            return ast.literal_eval(fld.attrs["eval"])
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            return _UNKNOWN
+    if "ref" in fld.attrs:
+        return fld.attrs["ref"]
+    return "".join(fld.parts).strip()
+
+
 def read_xml(path: str, data: bytes) -> tuple[list[Snippet], list[str]]:
+    """Server action code in Odoo XML data files, with the text Odoo would store
+    (``node.text``: the text before the first child element or comment; last field wins)."""
     if not data.strip():
         return [], []
     parser = expat.ParserCreate()
     snippets: list[Snippet] = []
-    record: dict | None = None
-    field_name: str | None = None
-    depth_in_field = 0
+    stack: list[_Record] = []
 
     def start(tag, attrs):
-        nonlocal record, field_name, depth_in_field
-        if field_name is not None:
-            depth_in_field += 1
+        top = stack[-1] if stack else None
+        if top is not None and top.current is not None:
+            fld = top.current
+            fld.closed = True
+            if tag == "record" and fld.depth == 0:  # one2many sub-record, e.g. action_server_ids
+                stack.append(_Record(attrs.get("model"), attrs.get("id", ""), (top, fld.name or "")))
+            else:
+                fld.depth += 1
             return
         if tag == "record":
-            record = {"model": attrs.get("model"), "id": attrs.get("id", ""), "fields": {}, "code_line": None,
-                      "line": parser.CurrentLineNumber}
-        elif tag == "field" and record is not None:
-            field_name = attrs.get("name")
-            depth_in_field = 0
-            record["fields"].setdefault(field_name, {"text": [], "attrs": attrs, "line": None})
+            stack.append(_Record(attrs.get("model"), attrs.get("id", ""), None))
+        elif tag == "field" and top is not None:
+            top.current = _Field(attrs.get("name"), attrs, parser.CurrentLineNumber)
 
     def end(tag):
-        nonlocal record, field_name, depth_in_field
-        if field_name is not None:
-            if depth_in_field:
-                depth_in_field -= 1
-                return
-            if tag == "field":
-                field_name = None
-                return
-        if tag == "record" and record is not None:
-            _finish_record(path, record, snippets)
-            record = None
+        top = stack[-1] if stack else None
+        if top is None:
+            return
+        if top.current is not None:
+            fld = top.current
+            if fld.depth:
+                fld.depth -= 1
+            elif tag == "field":
+                top.fields[fld.name or ""] = fld  # a repeated field replaces the earlier one
+                top.current = None
+            return
+        if tag == "record":
+            stack.pop()
+            _finish_record(path, top, snippets)
 
     def chars(text):
-        if record is not None and field_name is not None:
-            entry = record["fields"][field_name]
-            if entry["line"] is None:
-                entry["line"] = parser.CurrentLineNumber
-            entry["text"].append(text)
+        top = stack[-1] if stack else None
+        if top is None or top.current is None or top.current.depth:
+            return
+        fld = top.current
+        if not fld.closed:
+            if fld.text_line is None:
+                fld.text_line = parser.CurrentLineNumber
+            fld.parts.append(text)
+        elif text.strip() and fld.truncated_at is None:
+            fld.truncated_at = parser.CurrentLineNumber
+
+    def comment(_data):
+        top = stack[-1] if stack else None
+        if top is not None and top.current is not None and not top.current.depth:
+            top.current.closed = True
 
     parser.StartElementHandler = start
     parser.EndElementHandler = end
     parser.CharacterDataHandler = chars
+    parser.CommentHandler = comment
+    parser.ProcessingInstructionHandler = lambda _target, _data: comment(None)
     try:
         parser.Parse(data, True)
     except expat.ExpatError as err:
@@ -144,26 +208,48 @@ def read_xml(path: str, data: bytes) -> tuple[list[Snippet], list[str]]:
     return snippets, []
 
 
-def _finish_record(path: str, record: dict, snippets: list[Snippet]) -> None:
-    fields = record["fields"]
-    code = fields.get("code")
-    if record["model"] not in CODE_MODELS or code is None or code["line"] is None:
+def _finish_record(path: str, record: _Record, snippets: list[Snippet]) -> None:
+    fields = record.fields
+    code_field = fields.get("code")
+    if record.model not in CODE_MODELS or code_field is None:
         return
-    state = "".join(fields["state"]["text"]).strip() if "state" in fields else None
-    if state is not None and state != "code":
+    if "eval" in code_field.attrs:
+        code = _value(code_field)
+        if not isinstance(code, str):
+            return  # computed in XML; not knowable statically
+        first_line, truncated_at = code_field.start_line, None
+    else:
+        code = "".join(code_field.parts)
+        first_line = code_field.text_line or code_field.start_line
+        truncated_at = code_field.truncated_at
+    if not code.strip():
         return
-    if record["model"] == "ir.cron":
+    state = _value(fields.get("state"))
+    parent_model = record.parent[0].model if record.parent else None
+    if record.model == "ir.cron":
         caller = "cron"
-    elif record["model"] == "base.automation" or "base_automation_id" in fields:
+    elif record.model == "base.automation" or parent_model == "base.automation" or "base_automation_id" in fields:
         caller = "automation"
     else:
         caller = "server_action"
-    binding = None
-    if "binding_model_id" in fields:
-        view_types = "".join(fields["binding_view_types"]["text"]).strip() if "binding_view_types" in fields else ""
-        binding = view_types or "list,form"  # Odoo's default binding_view_types
-    snippets.append(Snippet(path=path, code="".join(code["text"]), first_line=code["line"],
-                            caller=caller, label=record["id"], binding=binding))
+    snippets.append(Snippet(
+        path=path, code=code, first_line=first_line, caller=caller, label=record.id,
+        binding=_binding(fields),
+        save_time_only=isinstance(state, str) and bool(state) and state != "code",
+        truncated_at=truncated_at,
+    ))
+
+
+def _binding(fields: dict[str, _Field]) -> str | None:
+    """binding_view_types when the action is offered in the Action menu, else None
+    (``binding_model_id eval="False"`` unbinds; an unreadable eval means unknown)."""
+    model = _value(fields.get("binding_model_id"))
+    if model is None or model is _UNKNOWN or model in (False, "", 0):
+        return None
+    view_types = _value(fields.get("binding_view_types"))
+    if view_types is None:
+        return "list,form"  # Odoo's default binding_view_types
+    return view_types if isinstance(view_types, str) and view_types else None
 
 
 def find_manifest(path: Path) -> Path | None:

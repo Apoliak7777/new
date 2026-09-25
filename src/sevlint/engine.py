@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import dis
 import types
+import warnings
 from dataclasses import dataclass, field
 
 from .profile import Profile
@@ -86,15 +87,25 @@ class Analysis:
 
 
 def iter_code_objects(code: types.CodeType):
-    """The root code object and, recursively, the ones stored in co_consts (like Odoo)."""
+    """The root code object and, recursively, the ones stored in co_consts (like Odoo).
+
+    Recursive on purpose: Odoo's assert_valid_codeobj recurses the same way, so absurdly
+    deep nesting raises RecursionError in both (see TooComplex)."""
     yield code
     for const in code.co_consts:
         if isinstance(const, types.CodeType):
             yield from iter_code_objects(const)
 
 
+def _runtime_code_objects(code: types.CodeType):
+    """Code objects whose names are resolved when the action runs. Python 3.14 compiles
+    annotations into lazy ``__annotate__`` functions that server action code never calls."""
+    return [c for c in iter_code_objects(code) if c.co_name != "__annotate__"]
+
+
 def _instructions(code: types.CodeType):
-    """(instruction, line) pairs for every instruction; line may be None."""
+    """(instruction, line) pairs; unlocated instructions (MAKE_CELL, COPY_FREE_VARS before
+    RESUME) get the previous line or, failing that, the code object's first line."""
     current = None
     for instr in dis.get_instructions(code):
         positions = getattr(instr, "positions", None)
@@ -105,25 +116,56 @@ def _instructions(code: types.CodeType):
                 start = instr.starts_line if isinstance(instr.starts_line, int) and not isinstance(instr.starts_line, bool) else None
             line = start if start is not None else current
         current = line if line is not None else current
-        yield instr, line
+        yield instr, line if line is not None else code.co_firstlineno
+
+
+def _count_lines(text: str) -> int:
+    """Line breaks as the compiler counts them (\\n, \\r\\n, \\r)."""
+    return text.count("\n") + text.count("\r") - text.count("\r\n")
+
+
+def split_lines(text: str) -> list[str]:
+    """Lines as the compiler numbers them (str.splitlines also splits on \\f, \\x1c, U+2028, ...)."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+class TooComplex(Exception):
+    """RecursionError/MemoryError while analysing; Odoo's own compile/check fails the same way."""
 
 
 def analyse(code_text: str) -> Analysis:
     stripped = code_text.strip()
     leading = code_text[: len(code_text) - len(code_text.lstrip())]
-    analysis = Analysis(stripped=stripped, line_offset=leading.count("\n"))
-    try:
-        analysis.code = compile(stripped, "", "exec", dont_inherit=True)
-    except SyntaxError as err:
-        what = type(err).__name__
-        line = err.lineno or 1
-        analysis.diagnostics.append(Diagnostic(line, "E001", f"{what}: {err.msg} ({SAVE_TIME})"))
-        return analysis
-    except (TypeError, ValueError) as err:
-        analysis.diagnostics.append(Diagnostic(1, "E001", f"{type(err).__name__}: {err} ({SAVE_TIME})"))
-        return analysis
-    analysis.tree = ast.parse(stripped)
+    analysis = Analysis(stripped=stripped, line_offset=_count_lines(leading))
+    with warnings.catch_warnings():
+        # Odoo runs without -O and with default warning filters: never let the linter's own
+        # interpreter flags (PYTHONOPTIMIZE, -W error) change the verdict.
+        warnings.simplefilter("ignore")
+        try:
+            analysis.code = compile(stripped, "", "exec", dont_inherit=True, optimize=0)
+        except SyntaxError as err:
+            analysis.diagnostics.append(Diagnostic(err.lineno or 1, "E001",
+                                                   f"{type(err).__name__}: {err.msg} ({SAVE_TIME})"))
+            return analysis
+        except Exception as err:  # noqa: BLE001 - Odoo turns any compile() failure into a rejection
+            analysis.diagnostics.append(Diagnostic(1, "E001", f"{type(err).__name__} while compiling: "
+                                                              f"{str(err)[:200]} ({SAVE_TIME})"))
+            return analysis
+        try:
+            analysis.tree = ast.parse(stripped)
+        except (RecursionError, MemoryError, SyntaxError, ValueError):
+            analysis.tree = None  # AST-based checks are skipped; bytecode checks still run
     return analysis
+
+
+ANNOTATION_NAMES = {"__annotate__", "__conditional_annotations__", "__annotations__"}
+ANNOTATION_HINT = ("annotated assignment `x: T = ...`", "drop the annotation")
+
+
+def _first_annotation_line(tree: ast.Module | None) -> int | None:
+    if tree is None:
+        return None
+    return min((n.lineno for n in ast.walk(tree) if isinstance(n, ast.AnnAssign)), default=None)
 
 
 def check_save_time(analysis: Analysis, profile: Profile) -> list[Diagnostic]:
@@ -131,22 +173,32 @@ def check_save_time(analysis: Analysis, profile: Profile) -> list[Diagnostic]:
     if analysis.code is None:
         return []
     out: set[Diagnostic] = set()
-    for code in iter_code_objects(analysis.code):
+    annotation_line = _first_annotation_line(analysis.tree)
+    try:
+        code_objects = list(iter_code_objects(analysis.code))
+    except RecursionError as err:
+        raise TooComplex("code objects nested too deeply") from err
+    for code in code_objects:
         forbidden_names = {n for n in code.co_names if "__" in n or n in profile.unsafe_attributes}
+        is_annotation = code.co_name == "__annotate__"
         for instr, line in _instructions(code):
+            about_annotations = is_annotation or instr.argval in ANNOTATION_NAMES or instr.opname == "SETUP_ANNOTATIONS"
+            if about_annotations and annotation_line and (code is analysis.code or is_annotation):
+                line = annotation_line
             if instr.opcode not in profile.safe_opcodes:
-                construct, hint = OPCODE_HINTS.get(instr.opname, (None, None))
+                construct, hint = ANNOTATION_HINT if about_annotations else OPCODE_HINTS.get(instr.opname, (None, None))
                 if construct:
                     msg = f"{construct} is not allowed (opcode {instr.opname}); {hint} ({SAVE_TIME})"
                 else:
                     msg = f"opcode {instr.opname} is not allowed by safe_eval ({SAVE_TIME})"
-                out.add(Diagnostic(line or 1, "E101", msg))
+                out.add(Diagnostic(line, "E101", msg))
             if forbidden_names and isinstance(instr.argval, str) and instr.argval in forbidden_names \
                     and instr.arg is not None and instr.opcode in dis.hasname:
-                out.add(Diagnostic(line or 1, "E102", _forbidden_name_message(instr.argval)))
+                out.add(Diagnostic(line, "E102", _forbidden_name_message(instr.argval)))
                 forbidden_names.discard(instr.argval)
         for name in sorted(forbidden_names):  # present in co_names but not located
-            out.add(Diagnostic(1, "E102", _forbidden_name_message(name)))
+            line = annotation_line if name in ANNOTATION_NAMES and annotation_line else code.co_firstlineno
+            out.add(Diagnostic(line, "E102", _forbidden_name_message(name)))
     return sorted(out)
 
 
@@ -154,12 +206,16 @@ def _forbidden_name_message(name: str) -> str:
     if name == "__doc__":
         return (f"a bare string as the first statement is a docstring and stores '__doc__'; "
                 f"use # comments ({SAVE_TIME})")
+    if name in ANNOTATION_NAMES:
+        return f"annotated assignment `x: T = ...` uses {name!r}; drop the annotation ({SAVE_TIME})"
     reason = "contains '__'" if "__" in name else "is in safe_eval's _UNSAFE_ATTRIBUTES"
     return f"access to forbidden name {name!r} (any name/attribute that {reason}) ({SAVE_TIME})"
 
 
 LOAD_NAME_OPS = {"LOAD_NAME", "LOAD_GLOBAL", "LOAD_FROM_DICT_OR_GLOBALS"}
 STORE_NAME_OPS = {"STORE_NAME", "DELETE_NAME"}
+ATTR_OPS = {"LOAD_ATTR", "LOAD_METHOD"}
+TRANSPARENT_OPS = {"EXTENDED_ARG", "CACHE", "NOP"}
 
 
 def defined_toplevel_names(code: types.CodeType) -> set[str]:
@@ -167,23 +223,46 @@ def defined_toplevel_names(code: types.CodeType) -> set[str]:
 
 
 def loaded_names(code: types.CodeType) -> list[tuple[str, int]]:
+    """(name, line) of every global/name load, i.e. names resolved in the eval context.
+    Function locals, parameters and comprehension variables are fast/cell loads and excluded."""
     seen: set[tuple[str, int]] = set()
     out: list[tuple[str, int]] = []
-    for obj in iter_code_objects(code):
+    for obj in _runtime_code_objects(code):
         for instr, line in _instructions(obj):
             if instr.opname in LOAD_NAME_OPS:
-                key = (instr.argval, line or 1)
+                key = (instr.argval, line)
                 if key not in seen:
                     seen.add(key)
                     out.append(key)
     return out
 
 
+def attribute_chains(code: types.CodeType, bases: set[str]) -> list[tuple[str, list[str], int]]:
+    """``base.a.b`` chains where ``base`` is a global/name load (not a local that shadows it)."""
+    out = []
+    for obj in _runtime_code_objects(code):
+        instrs = [(i, line) for i, line in _instructions(obj) if i.opname not in TRANSPARENT_OPS]
+        for idx, (instr, _) in enumerate(instrs):
+            if instr.opname not in LOAD_NAME_OPS or instr.argval not in bases:
+                continue
+            chain, line = [], None
+            for nxt, nxt_line in instrs[idx + 1: idx + 3]:
+                if nxt.opname not in ATTR_OPS:
+                    break
+                chain.append(nxt.argval)
+                line = line or nxt_line
+            if chain:
+                out.append((instr.argval, chain, line))
+    return out
+
+
 def check_names(analysis: Analysis, profile: Profile, modules: frozenset[str],
-                extra_names: frozenset[str]) -> list[Diagnostic]:
+                extra_names: frozenset[str], caller: str = "server_action") -> list[Diagnostic]:
     """E201 undefined name, W210 name provided only by an addon, E202 wrapped-module attribute."""
     if analysis.code is None:
         return []
+    if caller == "automation":
+        modules = modules | {"base_automation"}  # an automation rule implies the module
     out: list[Diagnostic] = []
     defined = defined_toplevel_names(analysis.code)
     known = profile.builtins | profile.context_core | defined | extra_names
@@ -192,41 +271,27 @@ def check_names(analysis: Analysis, profile: Profile, modules: frozenset[str],
             continue
         providers = profile.context_addons.get(name)
         if providers:
-            if not modules & set(providers):
-                out.append(Diagnostic(line, "W210", f"`{name}` exists only when module {' or '.join(providers)} is installed "
-                                                     f"(declare it with --modules)", "warning"))
+            if name == "payload" and (caller == "cron" or not modules & set(providers)):
+                out.append(Diagnostic(line, "W210", "`payload` exists only when base_automation is installed and the "
+                                                    "action runs from an HTTP request (webhook); never in a scheduled "
+                                                    "run", "warning"))
+            elif name != "payload" and not modules & set(providers):
+                out.append(Diagnostic(line, "W210", f"`{name}` exists only when module {' or '.join(providers)} is "
+                                                    f"installed (declare it with --modules)", "warning"))
             continue
         out.append(Diagnostic(line, "E201", f"name `{name}` is not defined in the server action context "
                                             f"(NameError, {RUNTIME})"))
-    if analysis.tree is not None:
-        out.extend(_check_wrapped(analysis.tree, profile, defined))
-    return out
-
-
-def _check_wrapped(tree: ast.Module, profile: Profile, defined: set[str]) -> list[Diagnostic]:
-    out: list[Diagnostic] = []
-    inner_nodes: set[int] = set()  # ast.walk yields a chain's outermost Attribute first
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Attribute) or id(node) in inner_nodes:
-            continue
-        chain = []
-        cur: ast.AST = node
-        while isinstance(cur, ast.Attribute):
-            chain.insert(0, cur.attr)
-            if cur is not node:
-                inner_nodes.add(id(cur))
-            cur = cur.value
-        if not isinstance(cur, ast.Name) or cur.id not in profile.wrapped_modules or cur.id in defined:
-            continue
-        allowed = profile.wrapped_modules[cur.id]
+    wrapped = {m for m in profile.wrapped_modules if m not in defined}
+    for base, chain, line in attribute_chains(analysis.code, wrapped):
+        allowed = profile.wrapped_modules[base]
         first = chain[0]
         if first not in allowed:
-            out.append(Diagnostic(node.lineno, "E202", f"`{cur.id}.{first}` is not exposed by Odoo's wrapped `{cur.id}` "
-                                                       f"(allowed: {', '.join(sorted(allowed))}; AttributeError, {RUNTIME})"))
+            out.append(Diagnostic(line, "E202", f"`{base}.{first}` is not exposed by Odoo's wrapped `{base}` "
+                                                f"(allowed: {', '.join(sorted(allowed))}; AttributeError, {RUNTIME})"))
             continue
         sub = allowed[first]
         if sub is not None and len(chain) > 1 and chain[1] not in sub:
-            out.append(Diagnostic(node.lineno, "E202", f"`{cur.id}.{first}.{chain[1]}` is not exposed by Odoo's wrapped "
-                                                       f"`{cur.id}.{first}` (allowed: {', '.join(sorted(sub))}; "
-                                                       f"AttributeError, {RUNTIME})"))
+            out.append(Diagnostic(line, "E202", f"`{base}.{first}.{chain[1]}` is not exposed by Odoo's wrapped "
+                                                f"`{base}.{first}` (allowed: {', '.join(sorted(sub))}; "
+                                                f"AttributeError, {RUNTIME})"))
     return out
