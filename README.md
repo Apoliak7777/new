@@ -43,7 +43,8 @@ pbpaste | sevlint check - --odoo 18.0 --caller cron            # macOS
 Get-Clipboard | sevlint check - --odoo 18.0 --caller cron      # Windows PowerShell
 ```
 
-`sevlint versions` lists the supported Odoo series, `sevlint explain E101` describes a rule.
+`sevlint versions` lists the supported Odoo series, `sevlint explain E101` describes a rule with
+examples. Output formats: `text` (default), `json`, `github` (workflow annotations), `sarif` (code scanning).
 Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input), 2 usage/config error
 (or, for `sevlint remote`, a connection/authentication error).
 
@@ -109,6 +110,8 @@ sevlint: mycompany.odoo.com: Odoo 19.0+e (Enterprise), 57 code action(s) read vi
   (hard-coded tokens included), so treat that directory like the database.
 
 ## Rules
+
+Every rule with a failing and a fixed example: [docs/rules.md](docs/rules.md) (or `sevlint explain W302`).
 
 | Code | When it hurts | What |
 | --- | --- | --- |
@@ -205,6 +208,23 @@ repos:
   with: {python-version: "3.12"}   # the Python your Odoo server runs
 - run: pip install git+https://github.com/Apoliak7777/new
 - run: sevlint check . --format github
+```
+
+`--format github` annotates the pull request. For the *Security → Code scanning* tab, write SARIF
+and upload it (public repositories, or private ones with GitHub Advanced Security):
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v7
+  - uses: actions/setup-python@v7
+    with: {python-version: "3.12"}
+  - run: pip install git+https://github.com/Apoliak7777/new
+  - run: sevlint check . --format sarif > sevlint.sarif || true   # findings must not stop the upload
+  - uses: github/codeql-action/upload-sarif@v4
+    with: {sarif_file: sevlint.sarif, category: sevlint}
 ```
 
 ### Claude Code plugin

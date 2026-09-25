@@ -100,7 +100,7 @@ def test_missing_file_is_a_problem(tmp_path, capsys, monkeypatch):
 
 def test_explain_and_versions(capsys):
     code, out, _ = run(["explain", "e101"], capsys=capsys)
-    assert code == 0 and out.startswith("E101:")
+    assert code == 0 and out.startswith("E101 forbidden-opcode:")
     code, out, _ = run(["versions"], capsys=capsys)
     assert code == 0 and re.search(r"^19\.0 +odoo/odoo@", out, re.M) and "saas-19.3" in out
 

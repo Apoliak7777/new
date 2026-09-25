@@ -5,9 +5,10 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from pathlib import Path
 
-from . import __version__, config, profile as profiles
+from . import __version__, catalog, config, profile as profiles
 from .linter import Options, Report, lint_paths, lint_text
 from .profile import CALLERS
 
@@ -16,62 +17,7 @@ from .profile import CALLERS
 DEFAULT_KEY_ENV = "ODOO_API_KEY"
 PROTOCOLS = ("auto", "json2", "xmlrpc")
 
-RULES = {
-    "E001": "Syntax error (or code too long/deep for the compiler). Odoo compiles `code.strip()` in exec "
-            "mode: strip() removes only the first line's indentation, so an indented block is an "
-            "IndentationError. Rejected when saving.",
-    "E003": "XML: child element inside <field name=\"code\">. Odoo's import_xml.rng allows only text there, "
-            "so the module fails to install.",
-    "E004": "Odoo 19.3+/20.0 with --unsafe-policy=raise/terminate: the runtime sandbox refuses bare "
-            "`except:`, `async def` and async comprehensions. Rejected when saving.",
-    "E101": "Forbidden opcode. The construct compiles to bytecode outside Odoo's _SAFE_OPCODES "
-            "(import, `obj.attr = x`, `del d[k]`, assert, with, class, closures, a, *b = ...). "
-            "Depends on the Python version Odoo runs on. Rejected when saving.",
-    "E102": "Forbidden name. Any name/attribute containing '__' or listed in _UNSAFE_ATTRIBUTES "
-            "(f_globals, mro, gi_frame, ...). String literals are NOT affected. Rejected when saving.",
-    "E201": "Undefined name. Not in the eval context, safe_eval builtins, or assigned in the code. "
-            "Odoo does not check this on save; the action raises NameError when the line runs. "
-            "Common cases: type, getattr, hasattr, print, ValueError, KeyError.",
-    "E202": "Attribute not exposed by a wrapped module (datetime, dateutil, time). "
-            "AttributeError at runtime, e.g. time.mktime or dateutil.easter.",
-    "E203": "Field renamed between Odoo versions: the model has a similarly named field that appeared when this "
-            "one disappeared (res.users groups_id -> group_ids in saas-18.2+, sale.order.line tax_id -> tax_ids). "
-            "Checked where the model is known: env['model'], user, env.user/company, record/records with the "
-            "action's model_id, and names assigned from those.",
-    "W203": "Field not in the target version's Odoo Community (it is in another version) and no obvious rename: "
-            "removed, or moved to an Enterprise/custom module.",
-    "W205": "Model not in the target version's Odoo Community (it is in another version).",
-    "E204": "sevlint remote: field the live database does not have. Judged in domains, rec['x'], "
-            "mapped()/filtered()/sorted()/read() strings, write()/create() keys that are x_ names or fields of some "
-            "Odoo version, and rec.x when x is an x_ name or a field of some Odoo version (other names may be "
-            "methods). Typical: a Studio field recreated as x_field_1.",
-    "W204": "sevlint remote: write()/create() key that is not a field of the live database's model: ValueError "
-            "(Invalid field) unless the model's create()/write() override consumes the key.",
-    "E205": "sevlint remote: env['model'] for a model not installed in the live database (KeyError). Not "
-            "reported when guarded by `'model' in env` or inside try:.",
-    "W110": "The verdict depends on the Python the Odoo server runs: comprehension closures and `(*a, b)` are "
-            "rejected before 3.12, `@` on 3.10, `assert` before 3.14, newer syntax where it does not exist. Silenced "
-            "when target-python pins the server's Python (then the verdict is exact).",
-    "W100": "XML: text after a comment or child element inside <field name=\"code\"> is dropped by Odoo "
-            "(it stores node.text only).",
-    "W210": "Name provided only by an addon (json: base_automation/website, request: website, "
-            "payload: base_automation + an HTTP request, never in scheduled runs). Declare installed modules "
-            "with --modules or config. `request` in a scheduled action is an unbound proxy.",
-    "W220": "Odoo 19.3+/20.0 with the default --unsafe-policy=log: bare `except:` / async code is logged by the "
-            "sandbox and rejected once the server runs with --unsafe-policy=raise. Use `except Exception:`.",
-    "W301": "env.cr.commit()/rollback() inside a server action: breaks atomicity of the action. "
-            "Commits inside a loop of a scheduled action (batching) are not reported.",
-    "W302": "ORM query method (search, search_count, read_group, ...) inside a loop, a per-record lambda "
-            "(filtered/mapped/sorted) or a helper called from one: one query per iteration. "
-            "`search(..., limit=N)` in a while loop (batching) is not reported.",
-    "W303": "raise UserError after write/create/unlink on the same path: the exception rolls the transaction "
-            "back. Fine for an intentional dry run (disable with `# sevlint: disable=W303`).",
-    "W304": "record/records in a scheduled action (ir.cron): both are None there.",
-    "W305": "`record` without `records` in an action offered in list views (or kanban views on 19.0+): "
-            "the code runs once, `record` is the first selected record, the rest is ignored.",
-    "W306": "raise Exception(...): safe_eval re-raises it as ValueError, the user sees a server error "
-            "with traceback. Raise UserError for a message.",
-}
+RULES = {rule.code: rule.text for rule in catalog.RULES}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -129,7 +75,8 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--unsafe-policy", choices=("disable", "log", "raise", "terminate"),
                         help="Odoo 19.3+/20.0 server option --unsafe-policy (default: the version's default, log)")
     parser.add_argument("--target-python", help="fail unless running on this Python (X.Y), to match the Odoo server")
-    parser.add_argument("--format", choices=("text", "json", "github"), default="text")
+    parser.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text",
+                        help="sarif: SARIF 2.1.0 for GitHub code scanning and other viewers")
     parser.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
     parser.add_argument("--config", type=Path, help="config file (default: nearest .sevlint.toml / pyproject.toml)")
 
@@ -164,7 +111,75 @@ def _natural(text: str) -> list:
     return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.split(r"(\d+)", text)]
 
 
+def _uri(path: str) -> str:
+    """A SARIF artifact URI: repository-relative (from the working directory) when possible."""
+    local = Path(path)
+    if local.is_absolute():
+        try:
+            local = local.relative_to(Path.cwd())
+        except ValueError:
+            return local.as_uri()
+    return urllib.parse.quote(local.as_posix())
+
+
+def _line_length(path: str, line: int, cache: dict) -> int | None:
+    if path not in cache:
+        try:
+            cache[path] = Path(path).read_bytes().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            cache[path] = None
+    lines = cache[path]
+    return len(lines[line - 1]) if lines is not None and 0 < line <= len(lines) else None
+
+
+def _sarif(report: Report) -> dict:
+    rules = catalog.RULES
+    index = {rule.code: i for i, rule in enumerate(rules)}
+    precision = {"save": "very-high", "install": "very-high", "future": "very-high", "runtime": "high"}
+    cache: dict = {}
+    results = []
+    for f in sorted(report.findings, key=lambda f: (_natural(f.path), f.line, f.code)):
+        width = _line_length(f.path, f.line, cache)
+        region = {"startLine": max(f.line, 1), "startColumn": 1, "endLine": max(f.line, 1),
+                  "endColumn": (width or 0) + 1}
+        where = f"{f.odoo_version} {f.caller}" + (f" {f.label}" if f.label else "")
+        results.append({
+            "ruleId": f.code, "ruleIndex": index[f.code], "level": "error" if f.severity == "error" else "warning",
+            "message": {"text": f"{f.message} [{where}]"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": _uri(f.path)}, "region": region}}],
+            "properties": {"odooVersion": f.odoo_version, "caller": f.caller},
+        })
+    notifications = [{"level": "error", "message": {"text": p}} for p in report.problems]
+    notifications += [{"level": "note", "message": {"text": n}} for n in report.notes]
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "sevlint", "semanticVersion": __version__, "informationUri": catalog.REPO,
+                "rules": [{
+                    "id": rule.code, "name": rule.name,
+                    "shortDescription": {"text": rule.title},
+                    "fullDescription": {"text": rule.text[:1024]},
+                    "help": {"text": f"{rule.text}\n\nBad:\n{rule.bad}\nGood:\n{rule.good}",
+                             "markdown": catalog.explain(rule).split("\n", 1)[1].strip()},
+                    "helpUri": rule.help_uri,
+                    "defaultConfiguration": {"level": rule.severity},
+                    "properties": {"tags": ["odoo", "safe_eval", rule.stage],
+                                   "precision": precision.get(rule.stage, "medium"),
+                                   "problem.severity": "error" if rule.severity == "error" else "warning"},
+                } for rule in rules],
+            }},
+            "invocations": [{"executionSuccessful": not report.problems,
+                             "toolExecutionNotifications": notifications}],
+            "results": results,
+        }],
+    }
+
+
 def render(report: Report, fmt: str) -> str:
+    if fmt == "sarif":
+        return json.dumps(_sarif(report), indent=1)
     if fmt == "json":
         return json.dumps({
             "findings": [f.__dict__ for f in report.findings],
@@ -341,14 +356,15 @@ def cmd_remote(args: argparse.Namespace) -> int:
 
 def cmd_explain(args: argparse.Namespace) -> int:
     if args.code:
-        text = RULES.get(args.code.upper())
-        if text is None:
+        rule = catalog.BY_CODE.get(args.code.upper())
+        if rule is None:
             print(f"unknown code {args.code}", file=sys.stderr)
             return 2
-        print(f"{args.code.upper()}: {text}")
+        print(catalog.explain(rule))
     else:
-        for code, text in RULES.items():
-            print(f"{code}: {text}")
+        for rule in catalog.RULES:
+            print(f"{rule.code}  {rule.name:<26} {rule.title}")
+        print(f"\n`sevlint explain CODE` shows the details and examples; all rules: {catalog.REPO}/blob/main/docs/rules.md")
     return 0
 
 
