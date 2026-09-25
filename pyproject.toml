@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sevlint"
+dynamic = ["version"]
+description = "Linter for Odoo server action code: catches what safe_eval rejects on save or breaks at runtime"
+readme = "README.md"
+license = "LGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["tomli>=2; python_version < '3.11'"]
+keywords = ["odoo", "safe_eval", "server-action", "linter", "claude-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: Odoo",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "python-dateutil>=2.8", "pytz>=2023.3"]
+
+[project.scripts]
+sevlint = "sevlint.cli:main"
+
+[project.urls]
+Source = "https://github.com/Apoliak7777/new"
+
+[tool.hatch.version]
+path = "src/sevlint/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sevlint"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

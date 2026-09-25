@@ -1,0 +1,10 @@
+{
+  "name": "sevlint",
+  "version": "0.1.0",
+  "description": "Lints Odoo server action / cron code (safe_eval) after every Write or Edit and teaches Claude the rules.",
+  "author": {"name": "Apoliak7777"},
+  "homepage": "https://github.com/Apoliak7777/new",
+  "repository": "https://github.com/Apoliak7777/new",
+  "license": "LGPL-3.0-only",
+  "keywords": ["odoo", "safe_eval", "server-action", "linter"]
+}

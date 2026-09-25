@@ -1,0 +1,5 @@
+The safe_eval.py files in this directory are unmodified copies of odoo/tools/safe_eval.py from
+https://github.com/odoo/odoo (branches 17.0, 18.0, 19.0; commits recorded in
+src/sevlint/data/odoo-<branch>.json). Copyright Odoo S.A., licensed under LGPL-3.0.
+They are used only by tests/test_oracle.py as the reference implementation.
+Regenerate with: python tools/sync_odoo.py 17.0 18.0 19.0

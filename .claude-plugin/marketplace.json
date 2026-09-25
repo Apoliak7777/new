@@ -1,0 +1,14 @@
+{
+  "name": "sevlint",
+  "description": "sevlint: linter for Odoo server action code (safe_eval) with a Claude Code hook and skill.",
+  "owner": {
+    "name": "Apoliak7777"
+  },
+  "plugins": [
+    {
+      "name": "sevlint",
+      "source": "./",
+      "description": "Odoo server action linter: safe_eval rules checked after every Write/Edit."
+    }
+  ]
+}
