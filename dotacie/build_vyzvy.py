@@ -186,6 +186,12 @@ notes = [
              "je to v poznámke."),
     ("Upozornenia", "Stránka optak.gov.cz bola z prostredia nedostupná; doplnky OP TAK, IROP, NRB a SZIF sú "
                     "z výsledkov vyhľadávania – pred ponukou klientovi overiť u poskytovateľa."),
+    ("Opravy po overení", "Overené 25. 9. 2026 (výsledky vyhľadávania, oficiálne stránky poskytovateľov); pôvodný "
+                          "termín zo zoznamu je v stĺpci Termín – poznámka. Uzavreté, hoci ich zoznam uvádzal ako "
+                          "otvorené: AOPK 17. a 18. výzva (2. 6. 2026), OPŽP 104. výzva (30. 6. 2026), NZÚ HOUSEnerg "
+                          "bytové domy A–D (8. 11. 2025; nástupca NZÚ 2026+ = riadok 117), OP ST Transformačný úver "
+                          "(pozastavený 10. 6. 2026). EIC Accelerator: posledný cut-off 2026 je 4. 11. Výzvu OPZ+ 092 "
+                          "(detské skupiny) sa overiť nepodarilo."),
     ("Nepridané (už uzavreté)", "OP TAK Digitální podnik I (18. 2. 2026) a II (17. 4. 2026), Inovace IV "
                                 "(20. 2. 2026), Potenciál III (17. 2. 2026), NRB Expanze (pozastavené od "
                                 "10. 8. 2026), EDIH II (25. 5. 2026), TA ČR TREND podprogram 2 (v 2026 sa nevyhlási)."),

@@ -18,10 +18,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from blog_data import CTA, DISCLAIMER, EU_NOTE, POSTS, ROUNDUP, ROUNDUP_POST  # noqa: E402
-from vyzvy_data import R, TODAY  # noqa: E402
+from vyzvy_data import L, R, TODAY  # noqa: E402
 
 OUT = HERE / "blog"
-UNVERIFIED = {108, 109, 114, 116}  # sekundárny zdroj alebo chýba uzávierka
+UNVERIFIED = {105, 108, 109, 114, 116}  # sekundárny zdroj, chýba uzávierka alebo sa výzvu nepodarilo overiť
 DUPLICATE = {85}
 
 
@@ -34,8 +34,8 @@ def cz_date(value: str | dt.date) -> str:
     return f"{date.day}. {date.month}. {date.year}"
 
 
-def cz_value(value: str) -> str:
-    return {"neuvedené": "neuvedeno", "": "neuvedeno"}.get(value, value)
+def cz_days(days: int) -> str:
+    return f"{days} " + ("den" if days == 1 else "dny" if 2 <= days <= 4 else "dní")
 
 
 def is_current(idx: int) -> bool:
@@ -76,7 +76,8 @@ def render_post(post: dict) -> str:
     parts = [f'<p class="lead">{esc(post["perex"])}</p>',
              table(None, [[esc(label), esc(value)] for label, value in post["facts"]])]
     for heading, intro, bullets in post["sections"]:
-        parts.append(f"<h2>{esc(heading)}</h2>")
+        if heading:
+            parts.append(f"<h2>{esc(heading)}</h2>")
         if intro:
             parts.append(f"<p>{esc(intro)}</p>")
         if bullets:
@@ -90,12 +91,13 @@ def render_post(post: dict) -> str:
 
 def roundup_rows(ids: tuple, overrides: dict) -> tuple[str, str]:
     first = row(ids[0])
-    amount = overrides.get("max") or " / ".join(v for v in (cz_value(first[8]), first[7]) if v != "neuvedené")
+    amount = overrides.get("max") or " / ".join(v for v in (first[8], first[7]) if v not in ("neuvedené", "")) \
+        or "neuvedeno"
     if "deadline" in overrides:
         deadline = overrides["deadline"]
     elif first[9]:
         days = (dt.date.fromisoformat(first[9]) - TODAY).days
-        deadline = cz_date(first[9]) + (f" (za {days} dní)" if days <= 14 else "")
+        deadline = cz_date(first[9]) + (f" (za {cz_days(days)})" if days <= 14 else "")
     else:
         deadline = "průběžně"
     return amount, deadline
@@ -107,15 +109,15 @@ def render_roundup() -> str:
     for heading, items in ROUNDUP:
         rows = []
         for ids, title, who, slug, overrides in items:
-            assert all(is_current(i) for i in ids), (ids, title)
+            if not all(is_current(i) for i in ids):
+                raise SystemExit(f"prehľad: {title!r} už nie je aktuálna (uzávierka, neoverená alebo duplicita)")
             amount, deadline = roundup_rows(ids, overrides)
-            new = " <strong>NOVÉ</strong>" if all(row(i)[0] != "Tvoj zoznam" for i in ids) else ""
+            new = " <strong>NOVÉ</strong>" if all(row(i)[0] != L for i in ids) else ""
             detail = f'<br/><em>Podrobně: {esc(by_slug[slug]["title"])}</em>' if slug else ""
             rows.append([esc(title) + new + detail, esc(who), esc(amount), esc(deadline)])
         parts.append(f"<h2>{esc(heading)}</h2>")
         parts.append(table(["Výzva", "Pro koho", "Max. dotace / míra podpory", "Uzávěrka"], rows))
-    eu = [i for i in range(1, len(R) + 1) if row(i)[1].startswith("EK") and is_current(i)]
-    parts.append(f"<h2>{esc(EU_NOTE[0])}</h2>\n<p>{esc(EU_NOTE[1].format(count=len(eu)))}</p>")
+    parts.append(f"<h2>{esc(EU_NOTE[0])}</h2>\n<p>{esc(EU_NOTE[1])}</p>")
     parts.append(footer())
     return section("\n".join(parts))
 
