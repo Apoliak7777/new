@@ -8,7 +8,10 @@ description: Rules for writing Odoo server action code (ir.actions.server state=
 Odoo stores `code.strip()` and on save runs `test_python_expr(..., mode="exec")`: bytecode and
 name checks only. Undefined names are only found when the line runs. After writing such code, run
 `sevlint check <file>` (or `sevlint check - --odoo 19.0 --caller cron` with the code on stdin).
-The plugin hook does this automatically after each Write/Edit.
+The plugin hook does this automatically after each Write/Edit. For actions that live only in a
+database (written in the UI), `sevlint remote https://host --db name` lints them read-only with that
+database's version, modules and fields; it needs the API key in `$ODOO_API_KEY` (never pass or echo
+the key yourself) and a user with Administration / Settings rights.
 
 ## Available names
 - Context: `env`, `model`, `record`, `records`, `uid`, `user`, `time`, `datetime`, `dateutil`,

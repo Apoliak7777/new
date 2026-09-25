@@ -69,3 +69,24 @@ def test_xml_model_id_gives_record_its_model(tmp_path):
 
 def test_header_model_key():
     assert [d.code for d in lint_code("x = records.groups_id", "19.0", model="res.users")] == ["E203"]
+
+
+def test_sorted_order_spec():
+    code = "lines = env['sale.order.line'].search([])\nx = lines.sorted('tax_id desc, id')\n"
+    assert codes(code) == [(2, "E203")]
+
+
+def test_delegate_true_is_delegation():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import fields_index
+    (parsed,) = fields_index.parse_models(
+        "class Cron(models.Model):\n"
+        "    _name = 'ir.cron'\n"
+        "    ir_actions_server_id = fields.Many2one('ir.actions.server', delegate=True, required=True)\n"
+        "    other_id = fields.Many2one(comodel_name='res.partner', delegate=True)\n"
+        "    plain_id = fields.Many2one('res.users')\n")
+    assert parsed[3] == {"ir.actions.server", "res.partner"}
+    versions, index = fields._index()
+    assert all(index["ir.cron"]["model_id"] >> i & 1 for i in range(len(versions)))

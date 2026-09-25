@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from . import __version__, config, profile as profiles
 from .linter import Options, Report, lint_paths, lint_text
 from .profile import CALLERS
+
+# Same values as in .remote, which is imported only when `sevlint remote` runs (it pulls in
+# urllib/xmlrpc; the Claude hook starts this module after every edit).
+DEFAULT_KEY_ENV = "ODOO_API_KEY"
+PROTOCOLS = ("auto", "json2", "xmlrpc")
 
 RULES = {
     "E001": "Syntax error (or code too long/deep for the compiler). Odoo compiles `code.strip()` in exec "
@@ -35,6 +41,14 @@ RULES = {
     "W203": "Field not in the target version's Odoo Community (it is in another version) and no obvious rename: "
             "removed, or moved to an Enterprise/custom module.",
     "W205": "Model not in the target version's Odoo Community (it is in another version).",
+    "E204": "sevlint remote: field the live database does not have. Judged in domains, rec['x'], "
+            "mapped()/filtered()/sorted()/read() strings, write()/create() keys that are x_ names or fields of some "
+            "Odoo version, and rec.x when x is an x_ name or a field of some Odoo version (other names may be "
+            "methods). Typical: a Studio field recreated as x_field_1.",
+    "W204": "sevlint remote: write()/create() key that is not a field of the live database's model: ValueError "
+            "(Invalid field) unless the model's create()/write() override consumes the key.",
+    "E205": "sevlint remote: env['model'] for a model not installed in the live database (KeyError). Not "
+            "reported when guarded by `'model' in env` or inside try:.",
     "W110": "The verdict depends on the Python the Odoo server runs: comprehension closures and `(*a, b)` are "
             "rejected before 3.12, `@` on 3.10, `assert` before 3.14, newer syntax where it does not exist. Silenced "
             "when target-python pins the server's Python (then the verdict is exact).",
@@ -70,15 +84,34 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("--odoo", help="Odoo series when no header/__manifest__.py says (default: 19.0)")
     check.add_argument("--caller", choices=CALLERS, help="context for code without one (default: server_action)")
     check.add_argument("--modules", default="", help="installed addons that extend the context, e.g. website,base_automation")
-    check.add_argument("--names", default="", help="extra names to treat as defined (enterprise/custom context)")
-    check.add_argument("--disable", default="", help="comma-separated codes to skip, e.g. W302,W303 (W* = all warnings)")
     check.add_argument("--all-py", action="store_true", help="lint .py files even without a '# sevlint:' header")
-    check.add_argument("--unsafe-policy", choices=("disable", "log", "raise", "terminate"),
-                       help="Odoo 19.3+/20.0 server option --unsafe-policy (default: the version's default, log)")
-    check.add_argument("--target-python", help="fail unless running on this Python (X.Y), to match the Odoo server")
-    check.add_argument("--format", choices=("text", "json", "github"), default="text")
-    check.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
-    check.add_argument("--config", type=Path, help="config file (default: nearest .sevlint.toml / pyproject.toml)")
+    _add_common(check)
+
+    remote = sub.add_parser("remote", help="lint the code actions of a live database (read-only, via its API)",
+                            description="Reads every server action, scheduled action and automation rule with "
+                                        "Python code from a running Odoo 17.0+ (JSON-2 on 19+, XML-RPC before) and "
+                                        "lints it with the database's own version, modules and fields. The API key "
+                                        f"is read from ${DEFAULT_KEY_ENV} (see --api-key-env), the keyring or a "
+                                        "prompt; never from the command line.")
+    remote.add_argument("url", help="server URL, e.g. https://mycompany.odoo.com")
+    remote.add_argument("--db", help="database name (required for XML-RPC and on multi-database servers)")
+    remote.add_argument("--user", help="login of the API key's user (XML-RPC only)")
+    remote.add_argument("--api-key-env", default=DEFAULT_KEY_ENV, metavar="VAR",
+                        help=f"environment variable holding the API key (default: {DEFAULT_KEY_ENV})")
+    remote.add_argument("--protocol", choices=PROTOCOLS, default="auto",
+                        help="auto: JSON-2 on Odoo 19+, XML-RPC before")
+    remote.add_argument("--odoo", help="lint against another Odoo version (upgrade check); fields are then checked "
+                                       "with the bundled index instead of the database")
+    remote.add_argument("--ids", default="", help="only these ir.actions.server ids, e.g. 12,40")
+    remote.add_argument("--only", default="", help=f"only these callers: {','.join(CALLERS)}")
+    remote.add_argument("--no-schema", action="store_true",
+                        help="do not read ir.model.fields; check fields with the bundled per-version index")
+    remote.add_argument("--dump", type=Path, metavar="DIR",
+                        help="also write each action's code to DIR/<id>_<name>.py with a sevlint header")
+    remote.add_argument("--timeout", type=float, default=30.0, help="seconds per request (default: 30)")
+    remote.add_argument("--allow-http", action="store_true", help="allow plain http to a host other than localhost")
+    remote.set_defaults(caller=None, modules="", all_py=False)
+    _add_common(remote)
 
     explain = sub.add_parser("explain", help="describe a rule code")
     explain.add_argument("code", nargs="?")
@@ -88,6 +121,17 @@ def _build_parser() -> argparse.ArgumentParser:
     hook = sub.add_parser("hook", help="integration entry points")
     hook.add_argument("kind", choices=("claude",), help="claude: Claude Code PostToolUse hook (reads JSON on stdin)")
     return parser
+
+
+def _add_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--names", default="", help="extra names to treat as defined (enterprise/custom context)")
+    parser.add_argument("--disable", default="", help="comma-separated codes to skip, e.g. W302,W303 (W* = all warnings)")
+    parser.add_argument("--unsafe-policy", choices=("disable", "log", "raise", "terminate"),
+                        help="Odoo 19.3+/20.0 server option --unsafe-policy (default: the version's default, log)")
+    parser.add_argument("--target-python", help="fail unless running on this Python (X.Y), to match the Odoo server")
+    parser.add_argument("--format", choices=("text", "json", "github"), default="text")
+    parser.add_argument("--strict", action="store_true", help="exit 1 on warnings too")
+    parser.add_argument("--config", type=Path, help="config file (default: nearest .sevlint.toml / pyproject.toml)")
 
 
 def _csv(value: str) -> frozenset[str]:
@@ -115,6 +159,11 @@ def _escape_property(text: str) -> str:
     return _escape_data(text).replace(":", "%3A").replace(",", "%2C")
 
 
+def _natural(text: str) -> list:
+    """'ir.actions.server/10' after 'ir.actions.server/9'."""
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.split(r"(\d+)", text)]
+
+
 def render(report: Report, fmt: str) -> str:
     if fmt == "json":
         return json.dumps({
@@ -125,7 +174,7 @@ def render(report: Report, fmt: str) -> str:
                         "snippets": report.snippets, "files": report.files},
         }, indent=1)
     lines = []
-    for f in sorted(report.findings, key=lambda f: (f.path, f.line, f.code)):
+    for f in sorted(report.findings, key=lambda f: (_natural(f.path), f.line, f.code)):
         where = f"{f.odoo_version} {f.caller}" + (f" {f.label}" if f.label else "")
         if fmt == "github":
             level = "error" if f.severity == "error" else "warning"
@@ -223,6 +272,73 @@ def _checked_options(args: argparse.Namespace, cfg: dict) -> Options:
     return opts
 
 
+def _ids(value: str) -> list[int]:
+    try:
+        return sorted({int(v) for v in _csv(value)})
+    except ValueError:
+        raise ValueError(f"--ids takes comma-separated record ids, not {value!r}") from None
+
+
+def cmd_remote(args: argparse.Namespace) -> int:
+    from . import remote
+
+    only = _csv(args.only)
+    if only - set(CALLERS):
+        print(f"sevlint: --only takes {', '.join(CALLERS)}", file=sys.stderr)
+        return 2
+    try:
+        ids = _ids(args.ids)
+        found = args.config or config.find(Path.cwd() / "-")
+        opts = _checked_options(args, config.load(found) if found is not None else {})
+        base = remote.parse_url(args.url, args.allow_http)
+        transport = remote.Transport(base, timeout=args.timeout)
+        info = remote.server_version(transport)
+        version = profiles.normalize_version(args.odoo) if args.odoo else info.series
+        profiles.load(version)  # an unsupported database or --odoo fails before asking for the key
+        key = remote.api_key(args.api_key_env, transport.host)
+        client = remote.connect(transport, info, protocol=args.protocol, db=args.db, login=args.user, key=key)
+        snapshot = remote.fetch(client, ids or None)
+        if only:
+            snapshot.actions = [a for a in snapshot.actions if a.caller in only]
+        schema = None
+        if not args.no_schema and version == info.series:
+            schema = remote.fetch_schema(client, remote.models_used(snapshot.actions))
+        report = remote.lint(snapshot, version, opts, schema)
+        written = remote.dump(snapshot, version, args.dump) if args.dump else []
+    except remote.RemoteError as err:
+        print(f"sevlint: {err}", file=sys.stderr)
+        return 2
+    except (config.ConfigError, OSError, ValueError) as err:
+        print(f"sevlint: {err}", file=sys.stderr)
+        return 2
+    edition = "Enterprise" if info.enterprise else "Community"
+    db = f" db {args.db}" if args.db else ""
+    report.notes.insert(0, f"{transport.host}{db}: Odoo {info.version} ({edition}), {len(snapshot.actions)} code "
+                           f"action(s) read via {client.protocol}")
+    if version != info.series:
+        report.notes.append(f"linted as Odoo {version} (the database runs {info.series}); fields checked with the "
+                            f"bundled index")
+    elif schema is None:
+        report.notes.append("fields checked with the bundled index (--no-schema)")
+    if written:
+        report.notes.append(f"wrote {len(written)} file(s) to {args.dump}")
+    output = render(report, args.format)
+    if output:
+        print(output)
+    running = "%d.%d" % sys.version_info[:2]
+    wrong = args.target_python if args.target_python and args.target_python != running else None
+    for line in report.problems + report.notes + _python_notes(report, wrong):
+        print(f"sevlint: {line}", file=sys.stderr)
+    if args.format == "text":
+        print(f"sevlint: {report.errors} error(s), {report.warnings} warning(s) in {report.snippets} action(s)",
+              file=sys.stderr)
+    if wrong:
+        return 2
+    if report.errors or (args.strict and report.warnings) or report.problems:
+        return 1
+    return 0
+
+
 def cmd_explain(args: argparse.Namespace) -> int:
     if args.code:
         text = RULES.get(args.code.upper())
@@ -254,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_explain(args)
     if args.command == "versions":
         return cmd_versions(args)
+    if args.command == "remote":
+        return cmd_remote(args)
     if args.command == "hook":
         from .hook import claude_post_tool_use
         return claude_post_tool_use(sys.stdin, sys.stderr)

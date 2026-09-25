@@ -58,6 +58,18 @@ def _is_field_call(node: ast.AST | None) -> bool:
     return isinstance(func, ast.Name) and func.id in FIELD_CLASSES
 
 
+def _delegated_comodel(call: ast.Call) -> str | None:
+    """The comodel of ``fields.Many2one('model', ..., delegate=True)``."""
+    func = call.func
+    if (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)) != "Many2one":
+        return None
+    if not any(k.arg == "delegate" and _literal(k.value) is True for k in call.keywords):
+        return None
+    comodel = call.args[0] if call.args else next((k.value for k in call.keywords if k.arg == "comodel_name"), None)
+    value = _literal(comodel) if comodel is not None else None
+    return value if isinstance(value, str) else None
+
+
 def parse_models(source: str) -> list[tuple[str, set[str], set[str], set[str]]]:
     """(model, own fields, parents via _inherit, delegated models via _inherits) per class."""
     try:
@@ -68,6 +80,7 @@ def parse_models(source: str) -> list[tuple[str, set[str], set[str], set[str]]]:
     for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
         attrs: dict[str, object] = {}
         fields: set[str] = set()
+        delegated: set[str] = set()  # Many2one(..., delegate=True): same as _inherits
         for stmt in cls.body:
             if isinstance(stmt, ast.Assign):
                 targets, value = stmt.targets, stmt.value
@@ -82,6 +95,9 @@ def parse_models(source: str) -> list[tuple[str, set[str], set[str], set[str]]]:
                     attrs[target.id] = _literal(value)
                 elif _is_field_call(value):
                     fields.add(target.id)
+                    comodel = _delegated_comodel(value)
+                    if comodel:
+                        delegated.add(comodel)
         name, inherit = attrs.get("_name"), attrs.get("_inherit")
         parents = {inherit} if isinstance(inherit, str) else set(inherit or []) if isinstance(inherit, list) else set()
         if not isinstance(name, str):
@@ -92,7 +108,7 @@ def parse_models(source: str) -> list[tuple[str, set[str], set[str], set[str]]]:
             else:
                 continue  # not a model class (or a computed name)
         delegates = set(attrs["_inherits"]) if isinstance(attrs.get("_inherits"), dict) else set()
-        out.append((name, fields, {p for p in parents if isinstance(p, str)} - {name}, delegates))
+        out.append((name, fields, {p for p in parents if isinstance(p, str)} - {name}, delegates | delegated))
     return out
 
 

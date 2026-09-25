@@ -14,7 +14,9 @@ examples/snippet.py:7: E202 `time.mktime` is not exposed by Odoo's wrapped `time
 ...
 ```
 
-* **Offline, no dependencies**: stdlib only. No Odoo installation, database, server or API key.
+* **Offline by default, no dependencies**: stdlib only. No Odoo installation, database or API key.
+  Optionally, `sevlint remote` reads the code actions of a live database (read-only) and checks them
+  against that database's own version, modules and fields.
 * **Same verdict as Odoo**: the save-time check re-implements `_check_python_code` →
   `test_python_expr(code.strip(), "exec")` with data extracted from Odoo's own `safe_eval`
   for **17.0, 18.0, 19.0, 20.0 and every Odoo Online release saas-17.1 … saas-19.4**. The test suite
@@ -42,7 +44,8 @@ Get-Clipboard | sevlint check - --odoo 18.0 --caller cron      # Windows PowerSh
 ```
 
 `sevlint versions` lists the supported Odoo series, `sevlint explain E101` describes a rule.
-Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input), 2 usage/config error.
+Exit code: 0 clean, 1 errors (or warnings with `--strict`, or unreadable input), 2 usage/config error
+(or, for `sevlint remote`, a connection/authentication error).
 
 ## What gets linted
 
@@ -63,6 +66,48 @@ Header keys (all optional):
 # sevlint: odoo=18.0 caller=cron modules=website,base_automation names=my_helper disable=W302 binding=list,form
 ```
 
+## Live database: `sevlint remote`
+
+Server actions, scheduled actions and automation rules are often written in the Odoo UI and never
+reach a repository. `sevlint remote` reads them from a running database and lints each one with
+the database's own Odoo version, installed modules and fields (Enterprise, custom and Studio `x_`
+fields included):
+
+```bash
+read -rs ODOO_API_KEY && export ODOO_API_KEY    # paste the key; it stays out of the shell history
+sevlint remote https://mycompany.odoo.com                                   # Odoo 19+ / Odoo Online: JSON-2
+sevlint remote https://erp.example.com --db prod --user admin@example.com   # 17.0/18.x: XML-RPC
+sevlint remote https://mycompany.odoo.com --odoo 19.0     # upgrade check: lint against another version
+sevlint remote https://mycompany.odoo.com --dump actions/ # also save each action as a .py with a header
+```
+
+```
+ir.actions.server/412:2: E204 field `x_studio_tier` does not exist on `res.partner` in this database; similar: `x_studio_tier_1` (ValueError, fails at runtime) [19.0 server_action 'Set tier' __export__.ir_act_server_412_5f1c]
+sevlint: mycompany.odoo.com: Odoo 19.0+e (Enterprise), 57 code action(s) read via JSON-2
+```
+
+* **What is read**: the version (`/web/webclient/version_info`, no login), then `search_read` on
+  `ir.module.module`, `ir.actions.server` (state `code`), `ir.cron`, `base.automation`, `ir.model`
+  and `ir.model.fields` (only the models the code uses). About 7 requests; on `*.odoo.com` sevlint
+  keeps to one request per second and honours `Retry-After`.
+* **Read-only**: the client calls no other method and refuses to (tested). Odoo API keys have
+  no read-only scope, so this guarantee is sevlint's, not Odoo's: create a dedicated key and revoke
+  it afterwards (Odoo 18+ lets you set a short duration). Reading server actions needs the
+  *Administration / Settings* group.
+* **The API key** comes from `$ODOO_API_KEY` (`--api-key-env` names another variable), the keyring
+  (`keyring set sevlint mycompany.odoo.com`, if the `keyring` package is installed) or a hidden
+  prompt; never from the command line. It is sent only to the given host: redirects are refused,
+  plain `http://` only to localhost (`--allow-http` overrides), and it never appears in the output.
+* **Field checks against the database** replace the bundled index: **E204** a field the database
+  does not have (in domains, `rec['x']`, `mapped()`/`filtered()`/`sorted()`/`read()`, and `rec.x` when
+  `x` is an `x_` name or a field of some Odoo version), **W204** an unknown key in
+  `write()`/`create()` values (an override may consume it), **E205** a model that is not installed
+  (unless guarded by `'model' in env` or `try:`). With `--odoo` (another version) or `--no-schema`
+  the bundled index is used instead.
+* `--ids 12,40` and `--only cron,automation` narrow the run; `--format json|github` work as for
+  `check`. `--dump` writes files for `sevlint check`; they may contain whatever the actions contain
+  (hard-coded tokens included), so treat that directory like the database.
+
 ## Rules
 
 | Code | When it hurts | What |
@@ -76,6 +121,9 @@ Header keys (all optional):
 | E203 | runtime | Field renamed between versions, e.g. `res.users.groups_id` → `group_ids` (saas-18.2+), `sale.order.line.tax_id` → `tax_ids`. |
 | W203 | runtime | Field that another Odoo version has but the target's Community does not (removed, or moved to Enterprise). |
 | W205 | runtime | Model that another Odoo version has but the target's Community does not. |
+| E204 | runtime | `sevlint remote`: field that the live database does not have (Studio `x_` fields included), e.g. a Studio field recreated as `x_field_1`. |
+| W204 | runtime | `sevlint remote`: key in `write()`/`create()` values that is not a field of the live database's model (unless the model's override consumes it). |
+| E205 | runtime | `sevlint remote`: `env['model']` for a model that is not installed in the live database. |
 | E202 | runtime | Attribute not exposed by wrapped `datetime`, `dateutil`, `time` (e.g. `time.mktime`, `dateutil.easter`). |
 | W110 | save | Rejected by Odoo on another Python the target version supports (comprehension closures before 3.12, `(*a, b)` before 3.12, `@` on 3.10, `assert` before 3.14, newer syntax). |
 | W100 | data | XML: code after a comment or child element inside `<field name="code">` is dropped by Odoo. |
@@ -193,14 +241,18 @@ the project config is ignored (with a note).
   and that sevlint rejects exactly the snippets Odoo rejects.
 * A weekly workflow checks the data against the Odoo branches (`--check`) and lints every server
   action shipped with Odoo Community as a false-positive regression test.
-* Current results: 0 findings on the server actions and crons in Odoo Community 17.0/18.0/19.0
-  (174/233/242 snippets from data, views, wizard and report XML) and on 40 snippets from eight OCA
-  17.0 repositories.
+* Current results: 0 findings on the server actions and crons shipped with Odoo Community in all 16
+  versions (157-300 snippets each from data, views, wizard and report XML; the one exception is a
+  genuine W305 in saas-19.4/20.0 `payment`) and on 40 snippets from eight OCA 17.0 repositories.
+* The field checks were run over Odoo's own model code (`self` typed as the class's model): of
+  6 000-7 300 field names per version in domains, vals, `mapped()`/`sorted()`/`read()` strings,
+  none was missing from the index except names that only abstract mixins use.
 
 ## Limitations
 
-* No database, so no field checks: `user.groups_id` is valid on 17/18 but renamed to `group_ids` in 19.0,
-  and sevlint cannot tell.
+* Offline field checks know Odoo Community only (Enterprise, Studio and custom fields are never
+  reported); `sevlint remote` checks against the real database. Either way only expressions whose
+  model is obvious are checked.
 * Enterprise or custom modules may add context names; declare them with `names`.
 * Which Python Odoo Online (SaaS) runs is not published; pick the closest `target-python`.
 * The W rules are heuristics.
