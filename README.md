@@ -282,7 +282,8 @@ the project config is ignored (with a note).
 
 ## Also in this repository
 
-[`dotacie/`](dotacie/): a comparison of Czech grant calls for grant consulting (in Slovak), unrelated to the linter.
+[`dotacie/`](dotacie/): a comparison of Czech grant calls for grant consulting (in Slovak) and Czech blog posts about
+the current calls for an Odoo website, unrelated to the linter.
 
 ## License
 
