@@ -110,7 +110,7 @@ def test_comprehension_closure_rejected_before_312():
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP 709 inlines comprehensions on 3.12+")
 def test_comprehension_closure_accepted_since_312():
-    assert codes("def f(n):\n    return [i * n for i in range(3)]") == []
+    assert codes("def f(n):\n    return [i * n for i in range(3)]", version="saas-19.1") == []
 
 
 def test_unknown_version():
@@ -176,3 +176,31 @@ def test_module_annotation_line_ignores_function_annotations():
 def test_hoisted_cell_of_inlined_comprehension_keeps_its_line():
     code = "partners = records.mapped('partner_id')\ngroups = [records.filtered(lambda r: r.partner_id == p) for p in partners]\n"
     assert {line for line, _ in codes(code)} == {2}
+
+
+def test_sandbox_rules_follow_the_policy():
+    bare = "try:\n    x = 1\nexcept:\n    x = 2\nasync def f():\n    pass"
+    assert codes(bare, version="19.0") == []  # no sandbox before saas-19.3
+    assert codes(bare, version="saas-19.3") == [(3, "W220"), (5, "W220")]
+    assert [(d.line, d.code) for d in lint_code(bare, "20.0", unsafe_policy="raise")] == [(3, "E004"), (5, "E004")]
+    assert lint_code(bare, "20.0", unsafe_policy="disable") == []
+    assert codes("try:\n    x = 1\nexcept Exception:\n    x = 2", version="20.0") == []
+
+
+def test_sandbox_context_names():
+    assert codes("x = BinaryBytes", version="saas-19.3") == []
+    assert codes("x = BinaryBytes", version="19.0") == [(1, "E201")]
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="on 3.10/3.11 the running Python rejects it (E101)")
+def test_cross_python_warning():
+    closure = "def f(n):\n    return [i * n for i in range(3)]"
+    assert codes(closure, version="19.0") == [(2, "W110")]  # 19.0 runs on 3.10-3.14
+    assert codes(closure, version="saas-19.1") == []  # 3.12+ only: no Python rejects it
+    assert lint_code(closure, "19.0", target_python="3.12") == []  # pinned: exact verdict
+    assert codes("def f(a):\n    return (*a, 1)", version="17.0") == [(2, "W110")]
+
+
+@pytest.mark.skipif(sys.version_info >= (3, 12), reason="3.12+ inlines comprehensions")
+def test_cross_python_error_on_old_python():
+    assert (2, "E101") in codes("def f(n):\n    return [i * n for i in range(3)]")

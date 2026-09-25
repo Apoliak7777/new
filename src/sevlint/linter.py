@@ -6,11 +6,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import engine, profile as profiles, rules, sources
+from . import crosspy, engine, fields, profile as profiles, rules, sources
 
 INLINE_DISABLE_RE = re.compile(r"#\s*sevlint:\s*disable(?:=(?P<codes>[\w,]+))?")
 DEFAULT_VERSION = "19.0"
-SAVE_TIME_CODES = ("E001", "E101", "E102")
+SAVE_TIME_CODES = ("E001", "E004", "E101", "E102")
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,8 @@ class Options:
     names: frozenset[str] = frozenset()
     disabled: frozenset[str] = frozenset()
     all_py: bool = False
+    unsafe_policy: str | None = None  # 19.3+ sandbox; None: the version's default
+    target_python: str | None = None  # pinned server Python: disables W110 (the verdict is exact)
 
 
 @dataclass(frozen=True)
@@ -74,36 +76,46 @@ def _list_bound(binding: str | None, version: str) -> bool:
     if not binding:
         return False
     view_types = {v.strip() for v in binding.split(",")}
-    return "list" in view_types or ("kanban" in view_types and float(version) >= 19)
+    return "list" in view_types or ("kanban" in view_types and profiles.version_key(version) >= (19, 0))
 
 
 def lint_code(code: str, version: str, caller: str = "server_action", *,
               modules: frozenset[str] = frozenset(), names: frozenset[str] = frozenset(),
               disabled: frozenset[str] = frozenset(), binding: str | None = None,
-              runtime_checks: bool = True) -> list[engine.Diagnostic]:
+              runtime_checks: bool = True, unsafe_policy: str | None = None,
+              model: str | None = None, target_python: str | None = None,
+              schema: fields.LiveSchema | None = None) -> list[engine.Diagnostic]:
     """Lint one piece of server action code; lines are relative to ``code``.
 
     ``binding`` is the action's binding_view_types when it is offered in the Action menu
     (e.g. "list,form"); None when unknown or not bound. ``runtime_checks=False`` keeps only
     the save-time checks (Odoo validates the code of every action, whatever its state).
+    ``schema`` is the live database's models/fields (sevlint remote): it replaces the
+    per-version field index.
     """
     prof = profiles.load(version)
     analysis = engine.analyse(code)
     diags = list(analysis.diagnostics)
     try:
         diags += engine.check_save_time(analysis, prof)
+        diags += engine.check_sandbox(analysis, prof, unsafe_policy)
+        diags += crosspy.check_cross_python(analysis, prof, target_python)
         if runtime_checks:
             diags += engine.check_names(analysis, prof, modules, names, caller)
             if analysis.tree is not None:
                 defined = engine.defined_toplevel_names(analysis.code)
                 diags += rules.run_rules(analysis.tree, analysis.code, caller, defined,
                                          list_bound=_list_bound(binding, version), version=version)
+                if schema is not None:
+                    diags += fields.check_live_fields(analysis.tree, version, model, schema)
+                else:
+                    diags += fields.check_fields(analysis.tree, version, model)
     except (engine.TooComplex, RecursionError, MemoryError) as err:
         diags = [engine.Diagnostic(1, "E001", f"{type(err).__name__}: code too long or too deeply nested for "
                                               f"Python's compiler; Odoo's check fails the same way "
                                               f"({engine.SAVE_TIME})")]
     if not runtime_checks:
-        diags = [d for d in diags if d.code in SAVE_TIME_CODES]
+        diags = [d for d in diags if d.code in SAVE_TIME_CODES or d.code == "W110"]
     raw_lines = engine.split_lines(code)
     out = []
     for diag in sorted(set(diags)):
@@ -117,7 +129,8 @@ def lint_code(code: str, version: str, caller: str = "server_action", *,
     return out
 
 
-def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str) -> list[Finding]:
+def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str,
+                 schema: fields.LiveSchema | None = None) -> list[Finding]:
     version = snippet.odoo_version or fallback_version
     caller = snippet.caller or opts.caller or "server_action"
     disabled = opts.disabled | snippet.disabled
@@ -126,7 +139,11 @@ def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str)
                       names=opts.names | snippet.names,
                       disabled=disabled,
                       binding=snippet.binding,
-                      runtime_checks=not snippet.save_time_only)
+                      runtime_checks=not snippet.save_time_only,
+                      unsafe_policy=opts.unsafe_policy,
+                      model=snippet.model,
+                      target_python=opts.target_python,
+                      schema=schema)
     findings = [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
                         version, caller, snippet.label) for d in diags]
     for line, code, severity, message in snippet.source_findings:
@@ -205,10 +222,11 @@ def lint_paths(paths: list[str], opts: Options, options_for=None) -> Report:
     return report
 
 
-def _lint_into(report: Report, snippet: sources.Snippet, opts: Options, fallback: str) -> None:
+def _lint_into(report: Report, snippet: sources.Snippet, opts: Options, fallback: str,
+               schema: fields.LiveSchema | None = None) -> None:
     where = f"{snippet.path}:{snippet.first_line}" + (f" ({snippet.label})" if snippet.label else "")
     try:
-        findings = lint_snippet(snippet, opts, fallback)
+        findings = lint_snippet(snippet, opts, fallback, schema)
     except ValueError as err:  # unsupported Odoo version for this snippet
         report.problems.append(f"{where}: {err}")
         return

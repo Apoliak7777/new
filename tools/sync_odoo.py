@@ -28,6 +28,7 @@ import argparse
 import ast
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -42,9 +43,12 @@ SPARSE_PATTERNS = [
     "/odoo/__init__.py",
     "/odoo/release.py",
     "/odoo/tools/safe_eval.py",
+    "/odoo/tools/safe_eval/*",  # 19.3+: package with evaluation.py / runtime.py (sandbox)
+    "/odoo/tools/config.py",
     "/odoo/addons/base/models/ir_actions.py",
     "/addons/*/models/ir_actions*.py",
 ]
+BRANCH_RE = re.compile(r"\d{2}\.0|saas-\d{2}\.\d")
 # Context names passed to safe_eval as wrapped modules (attribute whitelists apply).
 WRAPPED_IN_CONTEXT = ("datetime", "dateutil", "time")
 # Models whose _get_eval_context feeds ir.actions.server code evaluation.
@@ -146,7 +150,34 @@ def _module_assigns(tree: ast.Module) -> dict[str, ast.AST]:
     return out
 
 
-def extract_safe_eval(source: str) -> dict:
+def _monitoring_builtin_names(runtime_source: str, name: str) -> list[str]:
+    """Keys of ``_MONITORING_BUILTINS`` in safe_eval/runtime.py, e.g. ``safe_transformer.CALL_ID``
+    resolved through the ``_SafeTransformer`` class attributes."""
+    tree = ast.parse(runtime_source)
+    assigns = _module_assigns(tree)
+    node = assigns.get(name)
+    if not isinstance(node, ast.Dict):
+        raise ExtractError(f"{name} is not a dict literal in runtime.py")
+    class_attrs: dict[str, str] = {}
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        for stmt in cls.body:
+            if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) \
+                    and isinstance(stmt.value.value, str):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        class_attrs[target.id] = stmt.value.value
+    keys = []
+    for key in node.keys:
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            keys.append(key.value)
+        elif isinstance(key, ast.Attribute) and key.attr in class_attrs:
+            keys.append(class_attrs[key.attr])
+        else:
+            raise ExtractError(f"unsupported {name} key: {ast.unparse(key)}")
+    return keys
+
+
+def extract_safe_eval(source: str, runtime_source: str | None = None) -> dict:
     tree = ast.parse(source)
     assigns = _module_assigns(tree)
     env: dict[str, list[str]] = {}
@@ -187,7 +218,14 @@ def extract_safe_eval(source: str) -> dict:
     builtins_node = need("_BUILTINS")
     if not isinstance(builtins_node, ast.Dict):
         raise ExtractError("_BUILTINS is not a dict literal")
-    builtins = [ast.literal_eval(k) for k in builtins_node.keys]
+    builtins = []
+    for key, value in zip(builtins_node.keys, builtins_node.values):
+        if key is None:  # **_MONITORING_BUILTINS (19.3+ sandbox)
+            if not (isinstance(value, ast.Name) and runtime_source is not None):
+                raise ExtractError(f"unsupported _BUILTINS unpacking: {ast.unparse(value)}")
+            builtins += _monitoring_builtin_names(runtime_source, value.id)
+        else:
+            builtins.append(ast.literal_eval(key))
 
     wrapped = _extract_wrapped(tree, assigns)
 
@@ -210,7 +248,9 @@ def _extract_wrapped(tree: ast.Module, assigns: dict[str, ast.AST]) -> dict[str,
     wrapped: dict[str, dict] = {}
     for name, node in assigns.items():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "wrap_module":
-            spec = ast.literal_eval(node.args[1])
+            spec = _dunder_all_comprehension(node.args[1], assigns)
+            if spec is None:
+                spec = ast.literal_eval(node.args[1])
             if isinstance(spec, list):
                 wrapped[name] = {attr: None for attr in spec}
             elif isinstance(spec, dict):
@@ -234,6 +274,27 @@ def _extract_wrapped(tree: ast.Module, assigns: dict[str, ast.AST]) -> dict[str,
             else:
                 raise ExtractError(f"unsupported patch of wrapped module: {ast.unparse(stmt)}")
     return wrapped
+
+
+def _dunder_all_comprehension(node: ast.AST, assigns: dict[str, ast.AST]) -> dict | None:
+    """``{mod: getattr(dateutil, mod).__all__ for mod in mods}`` (saas-17.3+): the public API of
+    each dateutil submodule, resolved with the dateutil installed next to this tool."""
+    if not isinstance(node, ast.DictComp) or len(node.generators) != 1:
+        return None
+    comp = node.generators[0]
+    value = node.value
+    if not (isinstance(comp.iter, ast.Name) and comp.iter.id in assigns and isinstance(comp.target, ast.Name)
+            and isinstance(node.key, ast.Name) and node.key.id == comp.target.id
+            and isinstance(value, ast.Attribute) and value.attr == "__all__"
+            and isinstance(value.value, ast.Call) and isinstance(value.value.func, ast.Name)
+            and value.value.func.id == "getattr" and isinstance(value.value.args[0], ast.Name)):
+        raise ExtractError(f"unsupported wrap_module comprehension: {ast.unparse(node)}")
+    package = value.value.args[0].id
+    import importlib
+    spec = {}
+    for mod in ast.literal_eval(assigns[comp.iter.id]):
+        spec[mod] = list(importlib.import_module(f"{package}.{mod}").__all__)
+    return spec
 
 
 def _algorithm_fingerprint(tree: ast.Module) -> str:
@@ -323,6 +384,8 @@ def extract_contexts(src: Path) -> dict:
                             addons.setdefault(k, [])
                             if module not in addons[k]:
                                 addons[k].append(module)
+    for name in core:  # an addon re-assigning a core name (e.g. mail wrapping `env`) adds nothing
+        addons.pop(name, None)
     if not {"env", "model", "record", "records", "log", "UserError", "uid", "user", "datetime"} <= set(core):
         raise ExtractError(f"core eval context looks incomplete: {core}")
     return {"core": core, "addons": {k: sorted(v) for k, v in sorted(addons.items())}}
@@ -338,9 +401,32 @@ def extract_python_range(src: Path) -> dict:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) \
                     and stmt.targets[0].id in ("MIN_PY_VERSION", "MAX_PY_VERSION"):
                 found[stmt.targets[0].id] = list(ast.literal_eval(stmt.value))
-        if len(found) == 2:
-            return {"min": found["MIN_PY_VERSION"], "max": found["MAX_PY_VERSION"], "source": rel}
-    raise ExtractError("MIN_PY_VERSION/MAX_PY_VERSION not found")
+        if "MIN_PY_VERSION" in found:  # some branches declare no maximum
+            return {"min": found["MIN_PY_VERSION"], "max": found.get("MAX_PY_VERSION"), "source": rel}
+    raise ExtractError("MIN_PY_VERSION not found")
+
+
+def safe_eval_layout(src: Path) -> tuple[Path, list[Path]]:
+    """(file holding the checks, files to vendor for the oracle test)."""
+    tools = src / "odoo" / "tools"
+    if (tools / "safe_eval.py").is_file():
+        return tools / "safe_eval.py", [tools / "safe_eval.py"]
+    package = tools / "safe_eval"
+    if (package / "evaluation.py").is_file():
+        return package / "evaluation.py", sorted(package.glob("*.py"))
+    raise ExtractError("neither odoo/tools/safe_eval.py nor odoo/tools/safe_eval/evaluation.py found")
+
+
+def extract_sandbox(src: Path) -> dict | None:
+    """19.3+: safe_eval/runtime.py rewrites code and checks calls; policy comes from the
+    ``--unsafe-policy`` server option (default read from odoo/tools/config.py)."""
+    if not (src / "odoo" / "tools" / "safe_eval" / "runtime.py").is_file():
+        return None
+    config = (src / "odoo" / "tools" / "config.py").read_text()
+    match = re.search(r"dest=['\"]unsafe_policy['\"].*?my_default=['\"](\w+)['\"]", config, re.S)
+    if not match:
+        raise ExtractError("unsafe_policy default not found in odoo/tools/config.py")
+    return {"unsafe_policy_default": match.group(1)}
 
 
 # --------------------------------------------------------------------------
@@ -349,8 +435,10 @@ def sync(branch: str, src_root: Path | None, check: bool = False) -> bool:
     """Write the data files; with ``check``, only report whether they would change (ignoring the
     commit/sha bookkeeping in ``source``). Returns True when the data is unchanged."""
     src = checkout(branch, src_root)
-    safe_eval_path = src / "odoo" / "tools" / "safe_eval.py"
+    safe_eval_path, vendored = safe_eval_layout(src)
     source = safe_eval_path.read_text()
+    runtime_path = safe_eval_path.parent / "runtime.py"
+    runtime_source = runtime_path.read_text() if safe_eval_path.name == "evaluation.py" and runtime_path.exists() else None
     data = {
         "odoo_version": branch,
         "source": {
@@ -360,9 +448,13 @@ def sync(branch: str, src_root: Path | None, check: bool = False) -> bool:
             "safe_eval_sha256": hashlib.sha256(source.encode()).hexdigest(),
         },
         "python": extract_python_range(src),
-        **extract_safe_eval(source),
+        **extract_safe_eval(source, runtime_source),
         "context": extract_contexts(src),
+        "sandbox": extract_sandbox(src),
     }
+    if "getattr(dateutil, mod).__all__" in source:
+        import dateutil
+        data["source"]["dateutil_version"] = dateutil.__version__
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     out = DATA_DIR / f"odoo-{branch}.json"
     if check:
@@ -374,8 +466,13 @@ def sync(branch: str, src_root: Path | None, check: bool = False) -> bool:
         return same
     out.write_text(json.dumps(data, indent=1, sort_keys=False) + "\n")
     fixture = FIXTURE_DIR / branch
-    fixture.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(safe_eval_path, fixture / "safe_eval.py")
+    if fixture.exists():
+        shutil.rmtree(fixture)
+    tools = src / "odoo" / "tools"
+    for path in vendored:
+        target = fixture / path.relative_to(tools)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
     print(f"{branch}: {data['source']['commit'][:12]} fingerprint={data['algorithm_fingerprint']} -> {out.relative_to(ROOT)}")
     return True
 
@@ -386,6 +483,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--src-root", type=Path, help="reuse/keep checkouts in DIR/src-<branch>")
     parser.add_argument("--check", action="store_true", help="do not write; exit 1 if the extracted data changed")
     args = parser.parse_args(argv)
+    for branch in args.branches:
+        if not BRANCH_RE.fullmatch(branch):  # also guards the fixture directory that is replaced
+            parser.error(f"not an Odoo release branch: {branch!r} (expected e.g. 19.0 or saas-19.2)")
     if args.check:
         results = [sync(branch, args.src_root, check=True) for branch in args.branches]
         return 0 if all(results) else 1

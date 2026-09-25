@@ -12,17 +12,31 @@ CALLERS = ("server_action", "cron", "automation")
 
 
 def available_versions() -> list[str]:
-    names = [p.name for p in resources.files("sevlint.data").iterdir() if p.name.startswith("odoo-")]
-    return sorted((n[len("odoo-"):-len(".json")] for n in names), key=lambda v: float(v))
+    names = [p.name for p in resources.files("sevlint.data").iterdir()
+             if p.name.startswith("odoo-") and p.name.endswith(".json")]
+    return sorted((n[len("odoo-"):-len(".json")] for n in names), key=version_key)
+
+
+def version_key(version: str) -> tuple[int, int]:
+    """(major, minor): '19.0' -> (19, 0), 'saas-19.2' -> (19, 2)."""
+    major, _, minor = normalize_version(version).removeprefix("saas-").partition(".")
+    try:
+        return int(major), int(minor or 0)
+    except ValueError:
+        return (0, 0)
 
 
 def normalize_version(value: str | int | float) -> str:
-    text = str(value).strip()
+    """'19', '19.0', '19.0.1.0.0' -> '19.0'; 'saas-19.2', 'saas~19.2' (Odoo Online), '19.2' -> 'saas-19.2'."""
+    text = str(value).strip().lower().replace("saas~", "saas-")
+    saas = text.startswith("saas-")
+    text = text.removeprefix("saas-")
     if text.isdigit():
         text += ".0"
-    parts = text.split(".")
-    if len(parts) > 2:  # manifest style 19.0.1.0.0
-        text = ".".join(parts[:2])
+    text = ".".join(text.split(".")[:2])
+    major, _, minor = text.partition(".")
+    if saas or (minor.isdigit() and int(minor) > 0):
+        return f"saas-{major}.{minor or '0'}"
     return text
 
 
@@ -30,7 +44,7 @@ def normalize_version(value: str | int | float) -> str:
 class Profile:
     odoo_version: str
     python_min: tuple[int, int]
-    python_max: tuple[int, int]
+    python_max: tuple[int, int] | None  # None: the branch declares no maximum
     safe_opcodes: frozenset[int]
     unsafe_attributes: frozenset[str]
     builtins: frozenset[str]
@@ -38,10 +52,17 @@ class Profile:
     context_addons: dict[str, tuple[str, ...]]
     wrapped_modules: dict[str, dict[str, tuple[str, ...] | None]]
     source_commit: str
+    sandbox_policy: str | None = None  # 19.3+: default --unsafe-policy of the runtime sandbox
 
     @property
     def python_supported(self) -> bool:
-        return self.python_min <= sys.version_info[:2] <= self.python_max
+        running = sys.version_info[:2]
+        return self.python_min <= running and (self.python_max is None or running <= self.python_max)
+
+    @property
+    def python_range(self) -> str:
+        lo = ".".join(map(str, self.python_min))
+        return f"{lo}-{'.'.join(map(str, self.python_max))}" if self.python_max else f"{lo}+"
 
 
 def _to_opcodes(names: list[str]) -> set[int]:
@@ -66,7 +87,7 @@ def load(version: str) -> Profile:
     return Profile(
         odoo_version=version,
         python_min=tuple(data["python"]["min"]),
-        python_max=tuple(data["python"]["max"]),
+        python_max=tuple(data["python"]["max"]) if data["python"]["max"] else None,
         safe_opcodes=frozenset(safe),
         unsafe_attributes=frozenset(data["unsafe_attributes"]),
         builtins=frozenset(data["builtins"]),
@@ -77,4 +98,5 @@ def load(version: str) -> Profile:
             for mod, attrs in data["wrapped_modules"].items()
         },
         source_commit=data["source"]["commit"],
+        sandbox_policy=(data.get("sandbox") or {}).get("unsafe_policy_default"),
     )

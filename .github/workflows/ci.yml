@@ -27,9 +27,32 @@ jobs:
         run: |
           pip wheel . --no-deps -w dist
           python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-19.0.json'
+          python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-saas-19.2.json'
+          python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/fields.json.gz'
       - name: Examples produce the expected findings
         run: |
           rc=0
           sevlint check examples --format json > findings.json || rc=$?
           test "$rc" -eq 1
           python -c "import json; s = json.load(open('findings.json'))['summary']; assert s['errors'] == 8 and s['warnings'] == 5, s"
+
+  cross-python:
+    # sevlint predicts on which Pythons Odoo rejects version-dependent code (W110); check that
+    # prediction against Odoo's real safe_eval run under every supported Python.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+      - run: |
+          for v in 3.10 3.11 3.12 3.13 3.14; do "python$v" -m pip install -q python-dateutil pytz; done
+          pip install -e '.[test]'
+      - run: |
+          export SEVLINT_TEST_PYTHONS="$(which python3.10):$(which python3.11):$(which python3.12):$(which python3.13):$(which python3.14)"
+          pytest -q tests/test_cross_python.py
