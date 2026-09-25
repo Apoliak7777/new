@@ -121,3 +121,58 @@ def test_kanban_binding_on_19_only():
     code = "action = record.open()"
     assert [c for _, c in codes(code, binding="kanban,form")] == ["W305"]
     assert [d.code for d in lint_code(code, "18.0", binding="kanban,form")] == []
+
+
+def test_context_read_in_the_reassigning_statement():
+    assert codes("records = records.filtered(lambda r: r.active)\nfor rec in records:\n    rec.write({'x': 1})",
+                 caller="cron") == [(1, "W304")]
+    assert codes("record = record.sudo()\nrecord.write({'x': 1})", binding="list") == [(1, "W305")]
+
+
+def test_w303_earlier_iterations_headers_helpers_and_lambdas():
+    loop_branch = "for o in records:\n    if o.email:\n        o.write({'s': 1})\n    else:\n        raise UserError('x')"
+    assert codes(loop_branch) == [(5, "W303")]
+    loop_handler = ("for o in records:\n    try:\n        o.action_confirm()\n    except UserError:\n"
+                    "        o.write({'f': True})\n    except Exception:\n        raise UserError('u')")
+    assert codes(loop_handler) == [(7, "W303")]
+    helper_and_lambda = ("def close(o):\n    o.write({'s': 'done'})\n\nfor o in records:\n    close(o)\n"
+                         "if records.filtered(lambda o: not o.partner_id):\n    raise UserError('missing')")
+    assert codes(helper_and_lambda) == [(7, "W303")]
+    header = "for m in env['account.move'].create([{}]):\n    if not m.line_ids:\n        raise UserError('e')"
+    assert codes(header) == [(3, "W303")]
+    raise_in_helper = "records.write({'a': 1})\ndef check():\n    raise UserError('x')\ncheck()"
+    assert codes(raise_in_helper) == [(3, "W303")]
+    helper_before = "def notify(r):\n    r.message_post(body='d')\nnotify(record)\nif record.x:\n    raise UserError('x')"
+    assert codes(helper_before) == [(5, "W303")]
+
+
+def test_w303_caught_and_match():
+    caught = ("for o in records:\n    try:\n        o.write({'c': True})\n        if not o.email:\n"
+              "            raise UserError('no email')\n    except UserError as e:\n        o.message_post(body=str(e))")
+    assert codes(caught) == []
+    match = "match record.state:\n    case 'draft':\n        record.write({'s': 1})\n    case 'cancel':\n        raise UserError('c')"
+    assert codes(match) == []
+
+
+def test_w303_is_linear():
+    import time
+    src = "for rec in records:\n    rec.write({'a': 1})\n" + "".join(
+        f"    if rec.f{i} == {i}:\n        raise UserError('bad')\n" for i in range(2000))
+    start = time.perf_counter()
+    lint_code(src, "19.0")
+    assert time.perf_counter() - start < 10
+
+
+def test_batch_while_count_and_commit_in_helper():
+    loop = ("domain = [('state', '=', 'draft')]\nwhile env['sale.order'].search_count(domain):\n"
+            "    batch = env['sale.order'].search(domain, limit=500)\n    batch.action_cancel()\n    env.cr.commit()")
+    assert codes(loop, caller="cron") == []
+    helper = ("def process(batch):\n    batch.write({'d': True})\n    env.cr.commit()\n\nwhile True:\n"
+              "    batch = model.search([('d', '=', False)], limit=200)\n    if not batch:\n        break\n    process(batch)")
+    assert codes(helper, caller="cron") == []
+
+
+def test_request_in_cron():
+    assert codes("ip = request.httprequest.remote_addr", caller="cron") == [(1, "W210")]
+    assert [d.code for d in lint_code("ip = request.httprequest.remote_addr", "19.0", "server_action",
+                                      modules=frozenset({"website"}))] == []

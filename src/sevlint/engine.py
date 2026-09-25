@@ -104,19 +104,34 @@ def _runtime_code_objects(code: types.CodeType):
 
 
 def _instructions(code: types.CodeType):
-    """(instruction, line) pairs; unlocated instructions (MAKE_CELL, COPY_FREE_VARS before
-    RESUME) get the previous line or, failing that, the code object's first line."""
+    """(instruction, line) pairs. Unlocated instructions (MAKE_CELL/COPY_FREE_VARS before RESUME,
+    cells hoisted out of inlined comprehensions) take the line of a located instruction using the
+    same name, else the previous line, else the code object's first line."""
+    instrs = list(dis.get_instructions(code))
+    lines = [_located_line(i) for i in instrs]
+    by_name: dict[object, int] = {}
+    for instr, line in zip(instrs, lines):
+        if line is not None and isinstance(instr.argval, str):
+            by_name.setdefault(instr.argval, line)
     current = None
-    for instr in dis.get_instructions(code):
-        positions = getattr(instr, "positions", None)
-        line = positions.lineno if positions is not None and positions.lineno is not None else None
+    for instr, line in zip(instrs, lines):
         if line is None:
-            start = getattr(instr, "line_number", None)  # 3.13+
-            if start is None:
-                start = instr.starts_line if isinstance(instr.starts_line, int) and not isinstance(instr.starts_line, bool) else None
-            line = start if start is not None else current
+            if current is not None:
+                line = current  # continuation of the current line (3.10 marks only line starts)
+            elif isinstance(instr.argval, str):
+                line = by_name.get(instr.argval)  # hoisted before the first located instruction
         current = line if line is not None else current
         yield instr, line if line is not None else code.co_firstlineno
+
+
+def _located_line(instr: dis.Instruction) -> int | None:
+    positions = getattr(instr, "positions", None)
+    if positions is not None and positions.lineno is not None:
+        return positions.lineno
+    start = getattr(instr, "line_number", None)  # 3.13+
+    if start is None and isinstance(instr.starts_line, int) and not isinstance(instr.starts_line, bool):
+        start = instr.starts_line  # 3.10
+    return start
 
 
 def _count_lines(text: str) -> int:
@@ -163,9 +178,17 @@ ANNOTATION_HINT = ("annotated assignment `x: T = ...`", "drop the annotation")
 
 
 def _first_annotation_line(tree: ast.Module | None) -> int | None:
+    """First module-level annotated assignment (those inside functions compile to nothing)."""
     if tree is None:
         return None
-    return min((n.lineno for n in ast.walk(tree) if isinstance(n, ast.AnnAssign)), default=None)
+    todo, lines = list(tree.body), []
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.AnnAssign):
+            lines.append(node.lineno)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(node))
+    return min(lines, default=None)
 
 
 def check_save_time(analysis: Analysis, profile: Profile) -> list[Diagnostic]:
@@ -178,12 +201,15 @@ def check_save_time(analysis: Analysis, profile: Profile) -> list[Diagnostic]:
         code_objects = list(iter_code_objects(analysis.code))
     except RecursionError as err:
         raise TooComplex("code objects nested too deeply") from err
+    module_annotate = {id(c) for c in analysis.code.co_consts
+                       if isinstance(c, types.CodeType) and c.co_name == "__annotate__"}  # 3.14
     for code in code_objects:
         forbidden_names = {n for n in code.co_names if "__" in n or n in profile.unsafe_attributes}
         is_annotation = code.co_name == "__annotate__"
+        at_module_level = code is analysis.code or id(code) in module_annotate
         for instr, line in _instructions(code):
             about_annotations = is_annotation or instr.argval in ANNOTATION_NAMES or instr.opname == "SETUP_ANNOTATIONS"
-            if about_annotations and annotation_line and (code is analysis.code or is_annotation):
+            if about_annotations and annotation_line and at_module_level:
                 line = annotation_line
             if instr.opcode not in profile.safe_opcodes:
                 construct, hint = ANNOTATION_HINT if about_annotations else OPCODE_HINTS.get(instr.opname, (None, None))
@@ -271,7 +297,10 @@ def check_names(analysis: Analysis, profile: Profile, modules: frozenset[str],
             continue
         providers = profile.context_addons.get(name)
         if providers:
-            if name == "payload" and (caller == "cron" or not modules & set(providers)):
+            if name == "request" and caller == "cron":
+                out.append(Diagnostic(line, "W210", "`request` is an unbound proxy in a scheduled action (there is no "
+                                                    "HTTP request); using it raises RuntimeError", "warning"))
+            elif name == "payload" and (caller == "cron" or not modules & set(providers)):
                 out.append(Diagnostic(line, "W210", "`payload` exists only when base_automation is installed and the "
                                                     "action runs from an HTTP request (webhook); never in a scheduled "
                                                     "run", "warning"))

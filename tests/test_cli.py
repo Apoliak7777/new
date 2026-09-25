@@ -9,7 +9,7 @@ from sevlint import cli
 
 def run(argv, stdin="", monkeypatch=None, capsys=None):
     if monkeypatch is not None:
-        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin.encode("utf-8")), encoding="utf-8"))
     code = cli.main(argv)
     out, err = capsys.readouterr()
     return code, out, err
@@ -144,3 +144,42 @@ def test_notes_do_not_fail(tmp_path, capsys, monkeypatch):
     (tmp_path / "icon.svg").write_text("<svg/>")
     code, _, err = run(["check", "icon.svg"], capsys=capsys)
     assert code == 0 and "skipped" in err
+
+
+def test_missing_directory_and_stdin_mix(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    code, _, err = run(["check", "addosn"], capsys=capsys)
+    assert code == 1 and "no such file or directory" in err
+    code, _, err = run(["check", "-", "a.py"], capsys=capsys)
+    assert code == 2 and "cannot be combined" in err
+
+
+def test_nested_config_found_when_walking_a_directory(tmp_path, capsys, monkeypatch):
+    _needs_toml()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / ".sevlint.toml").write_text('names = ["foo"]\nodoo = "17.0"\n')
+    (tmp_path / "p" / "x.py").write_text("# sevlint:\nx = foo\n")
+    code, out, _ = run(["check", ".", "--format", "json"], capsys=capsys)
+    data = json.loads(out)
+    assert code == 0 and data["findings"] == []
+
+
+def test_every_target_python_is_checked(tmp_path, capsys, monkeypatch):
+    _needs_toml()
+    monkeypatch.chdir(tmp_path)
+    running = "%d.%d" % sys.version_info[:2]
+    for name, target in (("a", running), ("b", "2.7")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / ".sevlint.toml").write_text(f'target-python = "{target}"\n')
+        (tmp_path / name / "s.py").write_text("# sevlint:\nx = 1\n")
+    code, _, err = run(["check", "a", "b"], capsys=capsys)
+    assert code == 2 and "target-python 2.7" in err
+
+
+def test_stdin_is_read_as_utf8(capsys, monkeypatch):
+    raw = "x = 'Faktúra č. 1'\nimport os\n".encode("utf-8")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="cp1252"))
+    code = cli.main(["check", "-"])
+    out, _ = capsys.readouterr()
+    assert code == 1 and "<stdin>:2: E101" in out

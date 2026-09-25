@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 
 from . import config, profile as profiles
-from .cli import options_from, render
-from .linter import lint_paths
+from .cli import RULES, options_from, render
+from .linter import Options, lint_paths
 
 BLOCKING_EXIT = 2
 MAX_OUTPUT = 9000  # Claude Code caps hook output at 10,000 characters
@@ -41,19 +41,31 @@ def _python_problem(versions: set[str], target: str | None) -> str | None:
     return None
 
 
-def _emit(stderr, lines: list[str], path: Path) -> int:
+def _emit(stderr, lines: list[str], codes: list[str]) -> int:
     body, used = [], 0
     for line in lines:
         if used + len(line) > MAX_OUTPUT:
-            body.append(f"... {len(lines) - len(body)} more; run `sevlint check {path}` for the full list")
+            body.append(f"... and {len(lines) - len(body)} more")
             break
         body.append(line)
         used += len(line) + 1
     stderr.write("sevlint found problems in Odoo server action code "
                  "(E = Odoo rejects it or it crashes, W = likely bug):\n")
     stderr.write("\n".join(body) + "\n")
-    stderr.write("Fix the errors; explain any warning you keep. `sevlint explain <CODE>` describes a rule.\n")
+    explained = [f"  {code}: {RULES[code]}" for code in codes if code in RULES]
+    if explained and used + sum(map(len, explained)) < MAX_OUTPUT:
+        stderr.write("Rules:\n" + "\n".join(explained) + "\n")
+    stderr.write("Fix the errors; explain any warning you keep "
+                 "(or silence it on its line with `# sevlint: disable=CODE`).\n")
     return BLOCKING_EXIT
+
+
+def _looks_like_odoo_xml(path: Path) -> bool:
+    try:
+        head = path.read_bytes()[:4096]
+    except OSError:
+        return False
+    return b"<odoo" in head or b"<openerp" in head
 
 
 def claude_post_tool_use(stdin, stderr) -> int:
@@ -69,25 +81,43 @@ def claude_post_tool_use(stdin, stderr) -> int:
         path = Path(event["cwd"]) / path
     if path.suffix not in (".py", ".xml") or not path.is_file():
         return 0
+
+    # Stay silent for files without server action code (most edits), before touching config.
+    probe = lint_paths([str(path)], Options())
+    parse_problems = [p for p in probe.problems if "XML" in p and _looks_like_odoo_xml(path)]
+    if not probe.snippets and not parse_problems:
+        return 0
+
     cfg: dict = {}
+    notes: list[str] = []
     cfg_path = config.find(path)
     if cfg_path is not None:
         try:
             cfg = config.load(cfg_path)
-        except (config.ConfigError, OSError) as err:
-            stderr.write(f"sevlint: cannot use the project config, fix it: {err}\n")
-            return BLOCKING_EXIT
+        except config.ConfigError as err:
+            if config.tomllib is None:  # Python 3.10 without tomli: lint without the config
+                notes.append(f"sevlint: {cfg_path} ignored: {err}")
+            else:
+                stderr.write(f"sevlint: cannot use the project config, fix it: {err}\n")
+                return BLOCKING_EXIT
+        except OSError as err:
+            notes.append(f"sevlint: {cfg_path} ignored: {err}")
     no_flags = argparse.Namespace(odoo=None, caller=None, modules="", names="", disable="", all_py=False)
     try:
         report = lint_paths([str(path)], options_from(no_flags, cfg))
-    except ValueError as err:
-        stderr.write(f"sevlint: {err}\n")
-        return BLOCKING_EXIT
-    if not report.findings and not report.problems:
-        return 0
-    lines = render(report, "text").splitlines() if report.findings else []
-    lines += [f"sevlint: {p}" for p in report.problems]
+    except ValueError:
+        return 0  # e.g. an unsupported odoo version in the config: nothing Claude can fix
+    # Unsupported Odoo series (<= 16.0) are not ours to judge; unparseable non-Odoo XML neither.
+    problems = [p for p in report.problems if "unsupported Odoo version" not in p
+                and ("XML" not in p or _looks_like_odoo_xml(path))]
     python_problem = _python_problem(report.versions, cfg.get("target-python"))
-    if python_problem:
-        lines.insert(0, f"sevlint: {python_problem}")
-    return _emit(stderr, lines, path)
+    if not report.findings and not problems:
+        if python_problem:  # a clean verdict from the wrong interpreter: tell the user, not Claude
+            stderr.write(f"sevlint: {python_problem}\n")
+            return 1
+        return 0
+    lines = notes + ([f"sevlint: {python_problem}"] if python_problem else [])
+    lines += render(report, "text").splitlines() if report.findings else []
+    lines += [f"sevlint: {p}" for p in problems]
+    codes = sorted({f.code for f in report.findings})
+    return _emit(stderr, lines, codes)
