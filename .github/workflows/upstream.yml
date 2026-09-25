@@ -16,13 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ["17.0", "18.0", "19.0"]
+        branch: ["17.0", "saas-17.1", "saas-17.2", "saas-17.3", "saas-17.4",
+                 "18.0", "saas-18.1", "saas-18.2", "saas-18.3", "saas-18.4",
+                 "19.0", "saas-19.1", "saas-19.2", "saas-19.3", "saas-19.4", "20.0"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-      - run: pip install .
+          python-version: "3.12"  # 20.0 sources use 3.12 syntax; the sandbox needs 3.12+
+      - run: pip install '.[test]'  # python-dateutil: saas-17.3 exposes dateutil's __all__
       - name: Extracted data still matches odoo/odoo@${{ matrix.branch }}
         run: python tools/sync_odoo.py --check --src-root "$RUNNER_TEMP" ${{ matrix.branch }}
       - name: No findings on Odoo's own server actions
