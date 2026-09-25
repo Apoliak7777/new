@@ -1,6 +1,7 @@
 """Glue: snippets in, findings out."""
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,7 @@ from . import engine, profile as profiles, rules, sources
 
 INLINE_DISABLE_RE = re.compile(r"#\s*sevlint:\s*disable(?:=(?P<codes>[\w,]+))?")
 DEFAULT_VERSION = "19.0"
+SAVE_TIME_CODES = ("E001", "E101", "E102")
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,8 @@ class Finding:
 @dataclass
 class Report:
     findings: list[Finding] = field(default_factory=list)
-    problems: list[str] = field(default_factory=list)  # input problems (bad header, XML errors)
+    problems: list[str] = field(default_factory=list)  # input problems: they fail the run
+    notes: list[str] = field(default_factory=list)  # informational, never change the exit code
     snippets: int = 0
     files: int = 0
     versions: set[str] = field(default_factory=set)
@@ -49,6 +52,14 @@ class Report:
     def warnings(self) -> int:
         return sum(1 for f in self.findings if f.severity == "warning")
 
+    def merge(self, other: "Report") -> None:
+        self.findings += other.findings
+        self.problems += other.problems
+        self.notes += other.notes
+        self.snippets += other.snippets
+        self.files += other.files
+        self.versions |= other.versions
+
 
 def _suppressed(line_text: str, code: str) -> bool:
     match = INLINE_DISABLE_RE.search(line_text)
@@ -58,24 +69,42 @@ def _suppressed(line_text: str, code: str) -> bool:
     return codes is None or code in codes.split(",")
 
 
+def _list_bound(binding: str | None, version: str) -> bool:
+    """Offered where several records can be selected: list views, and kanban views from 19.0."""
+    if not binding:
+        return False
+    view_types = {v.strip() for v in binding.split(",")}
+    return "list" in view_types or ("kanban" in view_types and float(version) >= 19)
+
+
 def lint_code(code: str, version: str, caller: str = "server_action", *,
               modules: frozenset[str] = frozenset(), names: frozenset[str] = frozenset(),
-              disabled: frozenset[str] = frozenset(), binding: str | None = None) -> list[engine.Diagnostic]:
+              disabled: frozenset[str] = frozenset(), binding: str | None = None,
+              runtime_checks: bool = True) -> list[engine.Diagnostic]:
     """Lint one piece of server action code; lines are relative to ``code``.
 
     ``binding`` is the action's binding_view_types when it is offered in the Action menu
-    (e.g. "list,form"); None when unknown or not bound.
+    (e.g. "list,form"); None when unknown or not bound. ``runtime_checks=False`` keeps only
+    the save-time checks (Odoo validates the code of every action, whatever its state).
     """
     prof = profiles.load(version)
     analysis = engine.analyse(code)
     diags = list(analysis.diagnostics)
-    diags += engine.check_save_time(analysis, prof)
-    diags += engine.check_names(analysis, prof, modules, names)
-    if analysis.tree is not None:
-        defined = engine.defined_toplevel_names(analysis.code)
-        list_bound = bool(binding) and "list" in binding.split(",")
-        diags += rules.run_rules(analysis.tree, caller, defined, list_bound=list_bound)
-    raw_lines = code.splitlines()
+    try:
+        diags += engine.check_save_time(analysis, prof)
+        if runtime_checks:
+            diags += engine.check_names(analysis, prof, modules, names, caller)
+            if analysis.tree is not None:
+                defined = engine.defined_toplevel_names(analysis.code)
+                diags += rules.run_rules(analysis.tree, analysis.code, caller, defined,
+                                         list_bound=_list_bound(binding, version), version=version)
+    except (engine.TooComplex, RecursionError, MemoryError) as err:
+        diags = [engine.Diagnostic(1, "E001", f"{type(err).__name__}: code too long or too deeply nested for "
+                                              f"Python's compiler; Odoo's check fails the same way "
+                                              f"({engine.SAVE_TIME})")]
+    if not runtime_checks:
+        diags = [d for d in diags if d.code in SAVE_TIME_CODES]
+    raw_lines = engine.split_lines(code)
     out = []
     for diag in sorted(set(diags)):
         diag = diag.shifted(analysis.line_offset)
@@ -91,68 +120,107 @@ def lint_code(code: str, version: str, caller: str = "server_action", *,
 def lint_snippet(snippet: sources.Snippet, opts: Options, fallback_version: str) -> list[Finding]:
     version = snippet.odoo_version or fallback_version
     caller = snippet.caller or opts.caller or "server_action"
+    disabled = opts.disabled | snippet.disabled
     diags = lint_code(snippet.code, version, caller,
                       modules=opts.modules | snippet.modules,
                       names=opts.names | snippet.names,
-                      disabled=opts.disabled | snippet.disabled,
-                      binding=snippet.binding)
-    return [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
-                    version, caller, snippet.label) for d in diags]
+                      disabled=disabled,
+                      binding=snippet.binding,
+                      runtime_checks=not snippet.save_time_only)
+    findings = [Finding(snippet.path, snippet.first_line + d.line - 1, d.code, d.severity, d.message,
+                        version, caller, snippet.label) for d in diags]
+    if snippet.truncated_at and "W100" not in disabled and "W*" not in disabled:
+        findings.append(Finding(snippet.path, snippet.truncated_at, "W100", "warning",
+                                "Odoo keeps only the text before the first XML comment or child element inside "
+                                "<field name=\"code\">; the code after it is silently dropped", version, caller,
+                                snippet.label))
+    return findings
 
 
-def collect_files(paths: list[str]) -> list[tuple[Path, bool]]:
-    """(file, explicitly_given) pairs; directories are walked for .py/.xml."""
+def collect_files(paths: list[str]) -> tuple[list[tuple[Path, bool]], list[str]]:
+    """(file, explicitly_given) pairs and notes. Directories are walked for .py/.xml,
+    following symlinks (addons paths are often symlink farms) without looping."""
     out: list[tuple[Path, bool]] = []
+    notes: list[str] = []
     for raw in paths:
         path = Path(raw)
-        if path.is_dir():
-            for child in sorted(path.rglob("*")):
-                if child.suffix in (".py", ".xml") and child.is_file() \
-                        and not any(part.startswith(".") for part in child.relative_to(path).parts):
-                    out.append((child, False))
-        else:
+        if not path.is_dir():
             out.append((path, True))
-    return out
+            continue
+        seen: set[tuple[int, int]] = set()
+        for root, dirs, files in os.walk(path, followlinks=True):
+            try:
+                st = os.stat(root)
+            except OSError:
+                dirs[:] = []
+                continue
+            if (st.st_dev, st.st_ino) in seen:
+                dirs[:] = []
+                continue
+            seen.add((st.st_dev, st.st_ino))
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__"))
+            for name in sorted(files):
+                if name.endswith((".py", ".xml")):
+                    out.append((Path(root) / name, False))
+    return out, notes
+
+
+def _read_snippets(path: Path, opts: Options) -> tuple[list[sources.Snippet], list[str]]:
+    if path.suffix == ".xml":
+        return sources.read_xml(str(path), path.read_bytes())
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    return sources.read_python(str(path), text, require_header=not opts.all_py)
 
 
 def lint_paths(paths: list[str], opts: Options) -> Report:
     report = Report()
-    for path, explicit in collect_files(paths):
+    files, report.notes = collect_files(paths)
+    for path, explicit in files:
+        if path.suffix not in (".py", ".xml"):
+            if explicit:
+                report.notes.append(f"{path}: skipped (only .py and .xml are linted)")
+            continue
         if not path.is_file():
             report.problems.append(f"{path}: no such file")
             continue
-        if path.suffix == ".xml":
-            snippets, problems = sources.read_xml(str(path), path.read_bytes())
-        elif path.suffix == ".py":
-            text = path.read_text(encoding="utf-8", errors="replace")
-            snippets, problems = sources.read_python(str(path), text, require_header=not opts.all_py)
-        else:
-            if explicit:
-                report.problems.append(f"{path}: skipped (only .py and .xml are supported)")
+        try:
+            snippets, problems = _read_snippets(path, opts)
+        except OSError as err:
+            report.problems.append(f"{path}: cannot read ({err.strerror or err})")
             continue
-        report.problems += [f"{path}: {p}" if not p.startswith(str(path)) else p for p in problems]
+        report.problems += [p if p.startswith(str(path)) else f"{path}: {p}" for p in problems]
         if not snippets:
             continue
         report.files += 1
-        resolved = path.resolve()
-        fallback = sources.manifest_version(resolved) or opts.odoo or DEFAULT_VERSION
-        installed = sources.manifest_modules(resolved)
+        located = path.absolute()  # not resolve(): siblings of a symlinked module live next to the link
+        fallback = sources.manifest_version(located) or opts.odoo or DEFAULT_VERSION
+        installed = sources.manifest_modules(located)
         for snippet in snippets:
             snippet.modules |= installed
-            report.snippets += 1
-            report.versions.add(snippet.odoo_version or fallback)
-            report.findings += lint_snippet(snippet, opts, fallback)
+            _lint_into(report, snippet, opts, fallback)
     return report
+
+
+def _lint_into(report: Report, snippet: sources.Snippet, opts: Options, fallback: str) -> None:
+    where = f"{snippet.path}:{snippet.first_line}" + (f" ({snippet.label})" if snippet.label else "")
+    try:
+        findings = lint_snippet(snippet, opts, fallback)
+    except ValueError as err:  # unsupported Odoo version for this snippet
+        report.problems.append(f"{where}: {err}")
+        return
+    except Exception as err:  # noqa: BLE001 - one bad snippet must not abort the run
+        report.problems.append(f"{where}: internal error {type(err).__name__}: {err}; please report it")
+        return
+    report.snippets += 1
+    report.versions.add(snippet.odoo_version or fallback)
+    report.findings += findings
 
 
 def lint_text(text: str, path: str, opts: Options) -> Report:
     """Lint code given directly (stdin); the header is optional."""
     report = Report(files=1)
-    snippets, problems = sources.read_python(path, text, require_header=False)
+    snippets, problems = sources.read_python(path, text.lstrip("﻿"), require_header=False)
     report.problems += problems
-    fallback = opts.odoo or DEFAULT_VERSION
     for snippet in snippets:
-        report.snippets += 1
-        report.versions.add(snippet.odoo_version or fallback)
-        report.findings += lint_snippet(snippet, opts, fallback)
+        _lint_into(report, snippet, opts, opts.odoo or DEFAULT_VERSION)
     return report

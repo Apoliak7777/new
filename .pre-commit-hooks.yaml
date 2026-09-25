@@ -3,4 +3,4 @@
   description: Lint Odoo server action / cron code in module XML and '# sevlint:' .py files
   entry: sevlint check
   language: python
-  types_or: [xml, python]
+  files: \.(py|xml)$

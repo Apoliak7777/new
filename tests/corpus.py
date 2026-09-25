@@ -96,6 +96,7 @@ SNIPPETS = {
     "return_toplevel": "return 1",
     "subscript_field_set": "record['name'] = 'x'",
     "except_keyerror": "try:\n    x = {}['a']\nexcept KeyError:\n    x = None",
+    "filtered_lambda_closure": "def f(v):\n    return records.filtered(lambda r: r.x == v)",
     "long_code": "\n".join(f"x{i} = {i}" for i in range(400)),
     "large_jump": "if records:\n" + "\n".join(f"    x{i} = {i}" for i in range(3000)),
 }

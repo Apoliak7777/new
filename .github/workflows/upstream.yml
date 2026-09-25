@@ -28,5 +28,7 @@ jobs:
       - name: No findings on Odoo's own server actions
         run: |
           src="$RUNNER_TEMP/src-${{ matrix.branch }}"
-          git -C "$src" sparse-checkout add '/addons/*/data/*.xml' '/addons/*/views/*.xml' '/addons/*/__manifest__.py' '/odoo/addons/base/data/*.xml'
-          sevlint check "$src/addons" "$src/odoo/addons" --strict
+          git -C "$src" sparse-checkout add '/addons/*/__manifest__.py' '/addons/*/data/*.xml' '/addons/*/views/*.xml' \
+            '/addons/*/wizard/*.xml' '/addons/*/wizards/*.xml' '/addons/*/report/*.xml' \
+            '/odoo/addons/base/data/*.xml' '/odoo/addons/base/views/*.xml' '/odoo/addons/base/wizard/*.xml'
+          sevlint check "$src/addons" "$src/odoo/addons" --odoo ${{ matrix.branch }} --strict

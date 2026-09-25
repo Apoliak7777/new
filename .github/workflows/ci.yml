@@ -29,7 +29,7 @@ jobs:
           python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-19.0.json'
       - name: Examples produce the expected findings
         run: |
-          set +e
-          sevlint check examples --format json > findings.json
-          test $? -eq 1
+          rc=0
+          sevlint check examples --format json > findings.json || rc=$?
+          test "$rc" -eq 1
           python -c "import json; s = json.load(open('findings.json'))['summary']; assert s['errors'] == 8 and s['warnings'] == 5, s"

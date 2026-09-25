@@ -7,8 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/claude_hook.py"],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\"",
             "timeout": 30
           }
         ]
