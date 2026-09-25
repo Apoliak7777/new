@@ -1,0 +1,32 @@
+name: Odoo upstream
+
+# Weekly: fail when Odoo changes safe_eval / eval contexts (re-run tools/sync_odoo.py), and
+# lint every server action shipped with Odoo Community as a false-positive regression check.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ["17.0", "18.0", "19.0"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Extracted data still matches odoo/odoo@${{ matrix.branch }}
+        run: python tools/sync_odoo.py --check --src-root "$RUNNER_TEMP" ${{ matrix.branch }}
+      - name: No findings on Odoo's own server actions
+        run: |
+          src="$RUNNER_TEMP/src-${{ matrix.branch }}"
+          git -C "$src" sparse-checkout add '/addons/*/data/*.xml' '/addons/*/views/*.xml' '/addons/*/__manifest__.py' '/odoo/addons/base/data/*.xml'
+          sevlint check "$src/addons" "$src/odoo/addons" --strict

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Offered in list views: `record` is only the first selected order. -->
+    <record id="action_mark_vip" model="ir.actions.server">
+        <field name="name">Mark VIP</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="binding_model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">
+if not hasattr(record, 'x_vip'):
+    raise ValueError('missing field')
+record.x_vip = True
+        </field>
+    </record>
+
+    <record id="cron_followup" model="ir.cron">
+        <field name="name">Follow-up</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">
+for order in records:
+    count = env['sale.order'].search_count([('partner_id', '=', order.partner_id.id)])
+    order.write({'note': 'orders: %s' % count})
+env.cr.commit()
+        </field>
+        <field name="interval_type">days</field>
+    </record>
+</odoo>

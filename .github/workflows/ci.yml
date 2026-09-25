@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Odoo 17.0-19.0 accept Python 3.10-3.14; opcode verdicts differ between them.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[test]'
+      - run: pytest -q
+      - name: Wheel ships the data files
+        run: |
+          pip wheel . --no-deps -w dist
+          python -m zipfile -l dist/sevlint-*.whl | grep -q 'sevlint/data/odoo-19.0.json'
+      - name: Examples produce the expected findings
+        run: |
+          set +e
+          sevlint check examples --format json > findings.json
+          test $? -eq 1
+          python -c "import json; s = json.load(open('findings.json'))['summary']; assert s['errors'] == 8 and s['warnings'] == 5, s"
