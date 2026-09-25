@@ -1,0 +1,328 @@
+"""Porovnanie dotačných výziev ČR pre grantové poradenstvo -> vyzvy_CZ_porovnanie_2026-09-25.xlsx (pip install openpyxl)."""
+import datetime as dt
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.comments import Comment
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+
+TODAY = dt.date(2026, 9, 25)
+L = "Tvoj zoznam"
+W = "Doplnok (web)"
+OPEN, CONT, EXP = "Otvorená", "Priebežná", "Očakávaná"
+
+# (zdroj, poskytovateľ, výzva, pre koho, typ, územie, alokácia, max %, max dotácia, uzávierka, termín-pozn.,
+#  status v zdroji, relevancia, poznámka, overenie)
+R = [
+    (L, "Hl. m. Praha", "Cestovný ruch 2027 – Opatření I (asociačné kongresy a konferencie)", "Organizátori kongresov", "Grant", "Regionálne", "13 660 000 Kč", "100 %", "2 000 000 Kč", "2026-10-12", "", OPEN, "Stredná", "Úzka cieľová skupina (min. 300/700 účastníkov, 30–40 % zo zahraničia); krátky termín.", ""),
+    (L, "Hl. m. Praha", "Cestovný ruch 2027 – Opatření II (akcie celoštátneho/medzinár. významu)", "Organizátori podujatí", "Grant", "Regionálne", "9 000 000 Kč", "30 %", "2 000 000 Kč", "2026-10-12", "II.A max 2 mil. Kč, II.B max 0,5 mil. Kč", OPEN, "Stredná", "Akcie mimo centra/sezóny; nízka miera podpory (30 %).", ""),
+    (L, "Česká rozvojová agentura", "Program B2B – rozvojové partnerstvo pre súkromný sektor", "Firmy (obchodné korporácie)", "Grant", "Nadnárodné", "neuvedené", "50 %", "2 000 000 Kč", "2026-11-10", "", OPEN, "Vysoká", "Výstupom je štúdia uskutočniteľnosti/podnikateľský plán – typická konzultantská práca.", ""),
+    (L, "EK – ISF", "ISF-2026-TF2-AG-CYBER – digitálne vyšetrovanie (2 výzvy)", "Konzorcium EÚ (min. 2 štáty)", "Grant", "Nadnárodné", "€6,2 mil.", "100 %", "neuvedené", "2026-12-15", "", OPEN, "Nízka", "Polícia/justícia, medzinárodné konzorcium.", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL4-2027-01-MAT-PROD-16 – spracovanie surovín (10 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€49 mil.", "neuvedené", "€12,5 mil.", "2027-02-02", "", OPEN, "Nízka", "Pilotné prevádzky, výskumné konzorciá.", ""),
+    (L, "SFŽP ČR", "Kompenzácia zvýhodnených úverov NZÚ – 1/2026/NZÚ FN", "Banky", "Zvýhodnený úver", "Celorepublikové", "50 000 000 000 Kč", "neuvedené", "neuvedené", "2031-12-31", "", OPEN, "Nízka", "Žiadajú len banky; klient (SVJ, RD) z toho má úver k HOUSEnerg.", ""),
+    (L, "EK – Horizon Europe", "HORIZON-JU-CBE-2026 – oběhová bio Evropa (13 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€170,76 mil.", "neuvedené", "€3 mil.", "2026-09-22", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL2-2026-01-TRANSFO-05 – základné zručnosti", "Konzorcium (výskum)", "Grant", "Nadnárodné", "€12 mil.", "100 %", "€4 mil.", "2026-09-23", "", OPEN, "Nízka", "", ""),
+    (L, "ESPON 2030", "[COSMO-VIII] Štúdia Kyustendil–Kriva Palanka", "Konzultačné firmy (tender)", "Verejná zákazka", "Nadnárodné", "€220 000", "neuvedené", "neuvedené", "2026-09-23", "", OPEN, "Nízka", "Tender na štúdiu, nie dotácia.", ""),
+    (L, "ESPON 2030", "[CICERO] Krízové inovácie a regionálna konkurencieschopnosť", "Konzultačné firmy (tender)", "Verejná zákazka", "Nadnárodné", "€800 000", "neuvedené", "neuvedené", "2026-09-23", "", OPEN, "Nízka", "Tender na štúdiu, nie dotácia.", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL2-2026-01-HERITAGE-02 – kreatívne startupy", "Konzorcium EÚ", "Grant", "Nadnárodné", "€12 mil.", "100 %", "€6 mil.", "2026-09-23", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL2-2026-01 – kultúra, kreativita (26 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€12 mil.", "100 % (v zdroji 101 %)", "€4 mil.", "2026-09-23", "", OPEN, "Nízka", "", ""),
+    (L, "EK – ESF+", "ESF-2026-AG-TCS – transakčné náklady sociálneho financovania", "Finanční sprostredkovatelia", "Grant", "Nadnárodné", "€4,7 mil.", "neuvedené", "€1 mil.", "2026-09-23", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2026-04-WIDENING-01 – riadenie výskumu", "Konzorcium (min. 3 krajiny)", "Grant", "Nadnárodné", "€7 mil.", "100 %", "neuvedené", "2026-09-24", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2026-03-WIDENING-01 – Hop On Facility", "Výskumné organizácie", "Grant", "Nadnárodné", "€30 mil.", "neuvedené", "€600 000", "2026-09-24", "", OPEN, "Nízka", "", ""),
+    (L, "EK – ISF", "ISF-2026-TF2-AG-CORRUPT – boj proti korupcii", "Konzorcium EÚ", "Grant", "Nadnárodné", "€5 mil.", "neuvedené", "neuvedené", "2026-09-24", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2026-01-WIDENING-01 – synergie Teaming", "Konzorcium EÚ", "Grant", "Nadnárodné", "€7 mil.", "100 %", "neuvedené", "2026-09-24", "", OPEN, "Nízka", "", ""),
+    (L, "OP Životní prostředí", "104. výzva – prírode blízke opatrenia v krajine a sídlach", "Mix (obce, firmy, NNO, FO)", "Grant", "Regionálne (Praha + prechodové regióny)", "330 000 000 Kč", "100 %", "neuvedené", "2026-09-25", "", OPEN, "Vysoká", "Uzávierka dnes.", ""),
+    (L, "EK – EDF", "EDF-2026-LS-RA-CHALLENGE-DIGIT – dialóg človek-AI (2 výzvy)", "Obrana (konzorcium)", "Grant", "Nadnárodné", "€30 mil.", "100 %", "€7 mil.", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EDF", "EDF-2026-DA-ACC – endoatmosférický interceptor", "Obrana (konzorcium)", "Grant", "Nadnárodné", "€100 mil.", "neuvedené", "neuvedené", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EDF", "EDF-2026-LS-DA-DIS – OTH radary", "Obrana (konzorcium)", "Grant", "Nadnárodné", "€29 mil.", "neuvedené", "neuvedené", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EDF", "EDF-2026-RA – výskumné akcie (7 výziev)", "Obrana (konzorcium)", "Grant", "Nadnárodné", "€110 mil.", "100 %", "neuvedené", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2026-GENDER-Prize – šampióni rodovej rovnosti", "Organizácie s GEP", "Cena", "Nadnárodné", "€400 000", "neuvedené", "€100 000", "2026-09-29", "", OPEN, "Nízka", "Ocenenie, nie projekt.", ""),
+    (L, "EK – EDF", "EDF-2026-DA – vývoj obranných technológií (11 výziev)", "Obrana (konzorcium)", "Grant", "Nadnárodné", "€422 mil.", "neuvedené", "neuvedené", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EDF", "EDF-2026-LS-DA-SME – netematické vývojové akcie pre MSP", "Obranné MSP", "Grant", "Nadnárodné", "€30 mil.", "neuvedené", "neuvedené", "2026-09-29", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL6-2026-03-GOVERNANCE-01 – Earth Intelligence AI", "Konzorcium EÚ", "Grant", "Nadnárodné", "€1 mil.", "neuvedené", "neuvedené", "2026-09-30", "", OPEN, "Nízka", "", ""),
+    (L, "MK ČR", "Program záchrany architektonického dedičstva", "Vlastníci pamiatok", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "2026-09-30", "", OPEN, "Stredná", "Uzávierka o 5 dní.", ""),
+    (L, "EK – Digital Europe", "DIGITAL-2026-BESTUSE-RSF-10 – informačné prostredie (2 výzvy)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€6 mil.", "100 %", "neuvedené", "2026-10-01", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Digital Europe", "DIGITAL-2026-SKILLS-10 – pokročilé digitálne zručnosti (3 výzvy)", "Konzorcium (VŠ, firmy)", "Grant", "Nadnárodné", "€12,5 mil.", "100 %", "neuvedené", "2026-10-01", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Digital Europe", "DIGITAL-2026-BESTUSE-10 – centrá bezpečnejšieho internetu (2 výzvy)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€10 mil.", "neuvedené", "neuvedené", "2026-10-01", "", OPEN, "Nízka", "", ""),
+    (L, "EK – PPPA", "PPPA-2026-YOUTH-SOCIAL-MEDIA-DESIGN – sociálna platforma pre mladých", "Konzorcium EÚ", "Grant", "Nadnárodné", "€1,48 mil.", "80 %", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-CORECOEN-RAIL-WORKS – železnice TEN-T", "Infraštruktúra (správcovia, verejné orgány)", "Grant", "Nadnárodné", "€260 mil.", "neuvedené", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-COREGEN-RAIL-WORKS – železnice TEN-T", "Infraštruktúra (správcovia, verejné orgány)", "Grant", "Nadnárodné", "€350 mil.", "neuvedené", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-MILMOB-WORKS – civilno-obranné využitie TEN-T", "Infraštruktúra (správcovia, verejné orgány)", "Grant", "Nadnárodné", "€130 mil.", "neuvedené", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-SUSTMOBGEN-EMS-WORKS – námorné a vnútrozemské prístavy", "Prístavy, prevádzkovatelia plavidiel", "Grant", "Nadnárodné", "€200 mil.", "neuvedené", "€5 mil.", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-COREGEN-IWWP-WORKS – vnútrozemské vodné cesty", "Infraštruktúra (správcovia, verejné orgány)", "Grant", "Nadnárodné", "€350 mil.", "neuvedené", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – CEF", "CEF-T-2026-SIMOBGEN-NEWTECH-WORKS – digitalizácia cestnej dopravy", "Infraštruktúra (správcovia, verejné orgány)", "Grant", "Nadnárodné", "€20 mil.", "neuvedené", "neuvedené", "2026-10-06", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-MISS-2026-04 (3 výzvy)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€85,5 mil.", "neuvedené", "neuvedené", "2026-10-08", "", OPEN, "Nízka", "Názov v zdroji hovorí o stavebníctve, popis o pôde – overiť.", ""),
+    (L, "TA ČR – SIGMA", "Clean Energy Transition (CET) – Call 2026", "Firmy + výskum (medzinár. konzorcium)", "Grant", "Nadnárodné", "€1,2 mil.", "80 %", "€250 000", "2026-10-08", "", OPEN, "Nízka", "Min. 3 partneri z 3 krajín; 13 dní do uzávierky.", ""),
+    (L, "EK – PPPA", "PPPA-2026-REGIONAL-SUBMARINE-ISM-CABLE-HUBS – podmorské káble", "Konzorcium EÚ", "Grant", "Nadnárodné", "€3,94 mil.", "neuvedené", "neuvedené", "2026-10-08", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL2-2026-02-TRANSFO-01 – partnerstvo sociálne transformácie", "Poskytovatelia financovania výskumu", "Grant", "Nadnárodné", "€60 mil.", "30 %", "neuvedené", "2026-10-13", "", OPEN, "Nízka", "", ""),
+    (L, "EK – SMP", "SMP-FOOD-2026-FW-STAKEHOLDERS-PJ – potravinový odpad", "Organizácie/konzorciá", "Grant", "Nadnárodné", "neuvedené", "neuvedené", "neuvedené", "2026-10-15", "", OPEN, "Nízka", "", ""),
+    (L, "EK – JUST", "JUST-2027-JACC-EJUSTICE – e-Justice, práva obetí (2 výzvy)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€9,4 mil.", "neuvedené", "neuvedené", "2026-10-15", "", OPEN, "Nízka", "", ""),
+    (L, "TA ČR – SIGMA", "18. verejná súťaž – DC1 komercializácia VaVaI+", "Malé podniky a startupy", "Grant", "Celorepublikové", "10 000 000 Kč", "70 %", "730 000 Kč", "2026-10-27", "", OPEN, "Vysoká", "Výstupom je štúdia uskutočniteľnosti v angličtine – ideálne na spracovanie konzultantom.", ""),
+    (L, "EK – EIC", "HORIZON-EIC-2026-DEFENCE-01 – STEP Scale Up, obrana", "Obranné MSP / small mid-caps", "Iné mechanizmy", "Nadnárodné", "€100 mil.", "neuvedené", "€30 mil.", "2026-10-28", "", OPEN, "Nízka", "", ""),
+    (L, "AOPK ČR – OPŽP", "17. výzva SC 1.3 – prírode blízke opatrenia", "Mix (obce, vlastníci pozemkov, firmy, NNO)", "Grant", "Celorepublikové", "275 000 000 Kč", "100 %", "neuvedené", "2026-10-30", "", OPEN, "Vysoká", "Široký okruh žiadateľov, 100 %.", ""),
+    (L, "AOPK ČR – OPŽP", "18. výzva SC 1.6 – biodiverzita, chránené územia", "Mix (obce, vlastníci pozemkov, firmy, NNO)", "Grant", "Celorepublikové", "75 000 000 Kč", "100 %", "neuvedené", "2026-10-30", "", OPEN, "Vysoká", "", ""),
+    (L, "Hl. m. Praha", "Památková péče 2027 – vlastníci pamiatkovo významných objektov", "Vlastníci pamiatok (Praha)", "Grant", "Regionálne", "47 800 000 Kč", "65 %", "5 000 000 Kč", "2026-10-30", "", OPEN, "Vysoká", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL3-2026-01 – bezpečnosť pre spoločnosť (21 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€131 mil.", "100 %", "€6 mil.", "2026-11-05", "", OPEN, "Nízka", "", ""),
+    (L, "OP Životní prostředí", "72. výzva – ekologické záťaže", "Mix (obce, firmy, štát)", "Grant", "Celorepublikové", "1 700 000 000 Kč", "85 %", "neuvedené", "2026-11-10", "", OPEN, "Stredná", "Vyžaduje analýzu rizík – špecializované.", ""),
+    (L, "TA ČR", "Partnerství pro biodiverzitu – Call 2026 (BiodivFuture)", "Výskum + firmy (konzorcium)", "Grant", "Nadnárodné", "€1 mil.", "80 %", "€170 000", "2026-11-10", "", OPEN, "Nízka", "", ""),
+    (L, "EK – I3", "I3-2026-INV1 – medziregionálne investície do inovácií", "Konzorcium regiónov/firiem", "Iné mechanizmy", "Nadnárodné", "€28,2 mil.", "neuvedené", "neuvedené", "2026-11-12", "", OPEN, "Nízka", "", ""),
+    (L, "EK – I3", "I3-2026-INV2a – medziregionálne investície do inovácií", "Konzorcium regiónov/firiem", "Grant", "Nadnárodné", "€30,2 mil.", "neuvedené", "neuvedené", "2026-11-12", "", OPEN, "Nízka", "", ""),
+    (L, "EK – SOCPL", "SOCPL-2026-INFO-REPR – zastúpenie zamestnancov", "Odbory, zamestnávatelia", "Grant", "Nadnárodné", "€2,5 mil.", "90 %", "€350 000", "2026-11-12", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-RAISE-2026-01-03 – doktorandské siete AI vo vede", "Konzorcium (výskum)", "Grant", "Nadnárodné", "€30 mil.", "neuvedené", "neuvedené", "2026-11-24", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EIC", "HORIZON-EIC-2026-STEP – kapitál pre tech scale-upy", "Deep-tech MSP", "Kapitálový vstup", "Nadnárodné", "€300 mil.", "neuvedené", "€30 mil.", "2026-11-26", "", OPEN, "Nízka", "Len equity, kolá 50–150 mil. €.", ""),
+    (L, "NPO – MŽP", "Renovačný pas budovy a dotačné poradenstvo (výzva 2/2026)", "Poradcovia (evidencia SFŽP)", "Grant", "Celorepublikové", "200 000 000 Kč", "neuvedené", "8 000 Kč", "2026-11-30", "", OPEN, "Stredná", "Dotácia priamo pre poradcov – vyžaduje registráciu v evidencii SFŽP.", ""),
+    (L, "OP Zaměstnanost+", "12. výzva SC 1.2 – diverzitná a flexibilná pracovná kultúra", "Firmy, OSVČ, NNO, obce", "Grant", "Celorepublikové", "360 000 000 Kč", "100 %", "10 000 000 Kč", "2026-11-30", "", OPEN, "Vysoká", "100 % financovanie mäkkých projektov, široký okruh žiadateľov.", ""),
+    (L, "EK – EIC", "HORIZON-EIC-2026-ACCELERATOR-01 – EIC Accelerator", "MSP a startupy (deep-tech, TRL 5+)", "Grant + kapitál", "Nadnárodné", "neuvedené", "neuvedené", "neuvedené", "2026-12-17", "", OPEN, "Stredná", "Vysoká konkurencia, špecializované písanie.", ""),
+    (L, "OP Životní prostředí", "106. výzva – obnova stability svahov", "Obce, vlastníci, NNO", "Grant", "Celorepublikové", "100 000 000 Kč", "80 %", "neuvedené", "2026-12-17", "", OPEN, "Stredná", "", ""),
+    (L, "NPO – MMR a NRB", "Dostupné nájomné bývanie – výzva I", "Obce, developeri (projekty nad 250 mil. Kč)", "Zvýhodnený úver", "Celorepublikové", "2 250 000 000 Kč", "80 %", "1 200 000 000 Kč", "2026-12-31", "", OPEN, "Stredná", "Veľké projekty.", ""),
+    (L, "MZe ČR", "9.A.c Špeciálne poradenstvo – hydina, genomika", "Výskumné organizácie", "Grant", "Celorepublikové", "neuvedené", "100 %", "neuvedené", "2026-12-31", "", OPEN, "Nízka", "", ""),
+    (L, "EK – Digital Europe", "DIGITAL-ECCC-2027-DEPLOY-CYBER-11 – kyberbezpečnosť (7 výziev)", "Konzorciá, firmy vrátane MSP", "Grant", "Nadnárodné", "€96 mil.", "100 %", "€5 mil.", "2027-01-14", "", OPEN, "Nízka", "Jedna téma: AI-bezpečné riešenia v MSP.", ""),
+    (L, "EK – EuroHPC", "HORIZON-JU-EUROHPC-2026-NGC-04-01 – kvantové senzory", "Konzorcium EÚ", "Grant", "Nadnárodné", "€2 mil.", "neuvedené", "€500 000", "2027-01-14", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EuroHPC", "HORIZON-JU-EUROHPC-2026-STAND-05-01 – štandardy kvantových technológií", "Konzorcium EÚ", "Grant", "Nadnárodné", "10 000 000 Kč (v zdroji; asi €)", "neuvedené", "10 000 000 Kč (v zdroji)", "2027-01-19", "", OPEN, "Nízka", "Mena v zdroji pravdepodobne chybná.", ""),
+    (L, "EK – EuroHPC", "HORIZON-JU-EUROHPC-2026-PQC-06-01 – fotonické kvantové počítače", "Konzorcium vedené startupom", "Grant", "Nadnárodné", "€10 mil.", "neuvedené", "€10 mil.", "2027-01-26", "", OPEN, "Nízka", "", ""),
+    (L, "EK – JTM", "JTM-2026-PSLF – úvery pre verejný sektor (2 výzvy)", "Verejný sektor (uhoľné regióny)", "Grant + úver EIB", "Nadnárodné", "€630 mil.", "neuvedené", "neuvedené", "2027-02-16", "Priebežné uzávierky; ďalšia 16. 2. 2027", OPEN, "Stredná", "Pre obce/kraje v regiónoch spravodlivej transformácie.", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2027-04-WIDENING-01 – centrá excelencie", "Konzorcium EÚ", "Grant", "Nadnárodné", "€100 mil.", "neuvedené", "€4,5 mil.", "2027-03-04", "", OPEN, "Nízka", "", ""),
+    (L, "MZe ČR", "9.A.b Špeciálne poradenstvo – rastlinná výroba 2027", "Pestovateľské zväzy, vystavovatelia", "Grant", "Celorepublikové", "neuvedené", "80 %", "neuvedené", "2027-06-30", "", OPEN, "Nízka", "", ""),
+    (L, "EK – EDF/EDIP", "EDF-EDIP-P-2026-2027-FNLC-SA-SEAP – pohotovostné kapacity", "Obranný priemysel", "Grant", "Nadnárodné", "€10 mil.", "neuvedené", "€2 mil.", "2027-09-28", "", OPEN, "Nízka", "", ""),
+    (L, "SFŽP ČR – NZÚ", "HOUSEnerg bytové domy – C: zdroje energie", "SVJ, bytové družstvá, vlastníci BD", "Grant", "Celorepublikové", "neuvedené", "50 %", "neuvedené", "2028-06-30", "", OPEN, "Vysoká", "Veľký trh SVJ, dlhý termín.", ""),
+    (L, "SFŽP ČR – NZÚ", "HOUSEnerg bytové domy – D: adaptačné a mitigačné opatrenia", "SVJ, bytové družstvá, vlastníci BD", "Grant", "Celorepublikové", "neuvedené", "50 %", "neuvedené", "2028-06-30", "", OPEN, "Vysoká", "", ""),
+    (L, "SFŽP ČR – NZÚ", "HOUSEnerg bytové domy – A: zateplenie", "SVJ, bytové družstvá, vlastníci BD", "Grant", "Celorepublikové", "neuvedené", "50 %", "neuvedené", "2028-06-30", "", OPEN, "Vysoká", "", ""),
+    (L, "SFŽP ČR – NZÚ", "HOUSEnerg bytové domy – B: novostavba", "Stavebníci/prví nadobúdatelia BD", "Grant", "Celorepublikové", "neuvedené", "50 %", "150 000 Kč / byt (fix)", "2028-06-30", "", OPEN, "Stredná", "", ""),
+    (L, "SZP 2023–2027", "54.78 Podpora poradenstva – a) individuálne poradenstvo (záznam 11. 9. 2026)", "Poradcovia certifikovaní ADVIGREEN", "Grant", "Celorepublikové", "neuvedené", "80 %", "50 000 Kč", "", "priebežne", CONT, "Stredná", "Dotácia pre poľnohospodárskych poradcov.", ""),
+    (L, "Nadace ČEZ", "Podpora regiónov", "NNO a iné právnické osoby", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "priebežne (kolo od 1. 1. 2026)", CONT, "Nízka", "", ""),
+    (L, "Nadace Vinci", "Podpora občianskych iniciatív", "NNO", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "priebežne", CONT, "Nízka", "", ""),
+    (L, "NF Neuron", "Fond na podporu vedy", "Vedci", "Grant/cena", "Celorepublikové", "neuvedené", "neuvedené", "1 500 000 Kč", "", "priebežne", CONT, "Nízka", "", ""),
+    (L, "Nadace Leoše Janáčka", "Hudobná publicistika", "Periodiká", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "300 000 Kč", "", "uzávierky 15. 2. a 30. 9.", CONT, "Nízka", "", ""),
+    (L, "Nadace Vodafone", "Grantový program Laboratoř", "Startupy, NNO, sociálne podniky", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "priebežne", CONT, "Nízka", "", ""),
+    (L, "Nadace ČHF", "Kruh priateľov hudby", "Organizátori koncertov", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "uzávierky 30. 9. a 20. 11.", CONT, "Nízka", "", ""),
+    (L, "Národní rozvojová banka", "Zvýhodnený úver Energ (Praha)", "Firmy v Prahe", "Zvýhodnený úver", "Regionálne", "129 856 463 Kč", "neuvedené", "60 000 000 Kč", "", "priebežne", CONT, "Stredná", "Záznam z 2021 – overiť, či beží.", ""),
+    (L, "MZe ČR", "Príspevky vlastníkom poľovných psov a dravcov", "Užívatelia honitieb", "Grant", "Celorepublikové", "neuvedené", "100 %", "neuvedené", "", "priebežne (do 31. 8. za obdobie)", CONT, "Nízka", "", ""),
+    (L, "Visegrádský fond", "Štandardné granty", "Mix (partneri z V4)", "Grant", "Nadnárodné", "neuvedené", "100 %", "neuvedené", "", "uzávierky 1. 2. / 1. 6. / 1. 10.", CONT, "Nízka", "Najbližšia uzávierka 1. 10. 2026.", ""),
+    (L, "SZP 2023–2027", "Podpora poradenstva – a) individuálne poradenstvo (záznam 2023)", "Poradcovia certifikovaní ADVIGREEN", "Grant", "Celorepublikové", "241 015 304 Kč", "80 %", "50 000 Kč", "", "priebežne do vyčerpania", CONT, "Stredná", "Duplicita k záznamu z 11. 9. 2026 (starší záznam).", ""),
+    (L, "Národní rozvojová banka", "Nová ELENA (EPC projekty)", "Verejný sektor, firmy", "Iné mechanizmy", "Celorepublikové", "neuvedené", "90 %", "neuvedené", "", "priebežne", CONT, "Stredná", "", ""),
+    (L, "Národní rozvojová banka", "ENERG (Praha)", "Firmy v Prahe", "Zvýhodnený úver", "Regionálne", "90 000 000 Kč", "neuvedené", "60 000 000 Kč", "", "priebežne", CONT, "Stredná", "Záznam z 2021 – overiť, či beží.", ""),
+    (L, "NF nezávislé žurnalistiky", "Rozvojový grant", "Redakcie (predchádzajúci príjemcovia)", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "priebežne", CONT, "Nízka", "", ""),
+    (L, "Visegrádský fond", "Visegrad + západný Balkán", "Mix (V4 + WB/EaP)", "Grant", "Nadnárodné", "neuvedené", "100 %", "neuvedené", "", "uzávierky 1. 2. / 1. 6. / 1. 10.", CONT, "Nízka", "", ""),
+    (L, "CzechInvest", "ESA BIC Czech Republic", "Space startupy", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "€200 000", "", "priebežne", CONT, "Nízka", "", ""),
+    (L, "Visegrádský fond", "Strategické projekty", "Mix (všetky štáty V4)", "Grant", "Nadnárodné", "neuvedené", "100 %", "neuvedené", "", "uzávierky 1. 2. / 1. 6. / 1. 10.", CONT, "Nízka", "", ""),
+    (L, "SZP 2023–2027", "54.78 Podpora poradenstva – záměry b)–f)", "Poradcovia, vzdelávacie subjekty, výskum", "Grant", "Celorepublikové", "€9 994 000 (v zdroji; asi Kč)", "100 %", "4 800 000 (v zdroji €; asi Kč)", "", "priebežne do vyčerpania", EXP, "Stredná", "Mena v zdroji pravdepodobne chybná.", ""),
+    (L, "OP Doprava", "48. výzva – bežné dobíjacie stanice v obciach", "Vlastníci/správcovia infraštruktúry", "Grant", "Celorepublikové", "70 000 000 Kč", "80 %", "neuvedené", "", "vyhlásenie 12/2026, koniec 03/2027", EXP, "Stredná", "Min. 20 dobíjacích bodov.", ""),
+    (L, "OP Doprava", "44. výzva – rýchlodobíjanie osobných áut, prioritné oblasti", "Vlastníci/správcovia infraštruktúry", "Grant", "Celorepublikové", "100 000 000 Kč", "70 %", "neuvedené", "", "vyhlásenie 08/2026, koniec 11/2026", EXP, "Stredná", "", ""),
+    (L, "OP Doprava", "46. výzva – rýchlodobíjanie osobných áut, celá ČR", "Vlastníci/správcovia infraštruktúry (aj firmy)", "Grant", "Celorepublikové", "315 000 000 Kč", "55 %", "neuvedené", "", "vyhlásenie 09/2026, koniec 12/2026", EXP, "Vysoká", "Aj pre firmy (obchody, hotely) s verejným prístupom.", ""),
+    (L, "OP Doprava", "45. výzva – bežné dobíjacie stanice v obciach", "Vlastníci/správcovia infraštruktúry", "Grant", "Celorepublikové", "150 000 000 Kč", "80 %", "neuvedené", "", "vyhlásenie 08/2026, koniec 11/2026", EXP, "Stredná", "Min. 20 dobíjacích bodov.", ""),
+    (L, "OP Doprava", "47. výzva – rýchlodobíjanie nákladných vozidiel", "Vlastníci/správcovia infraštruktúry (aj firmy)", "Grant", "Celorepublikové", "500 000 000 Kč", "80 %", "neuvedené", "", "vyhlásenie 10/2026, koniec 01/2027", EXP, "Vysoká", "", ""),
+    (L, "Hl. m. Praha", "Životné prostredie 2027 – VII. adaptácia a mitigácia", "Mix (Praha: NNO, SVJ, FO)", "Grant", "Regionálne", "11 250 000 Kč", "100 %", "600 000 Kč", "2026-11-05", "", EXP, "Stredná", "", ""),
+    (L, "Hl. m. Praha", "Životné prostredie 2027 – I. verejná zeleň", "Mix (Praha: NNO, SVJ, FO)", "Grant", "Regionálne", "4 500 000 Kč", "100 %", "450 000 Kč", "2026-11-05", "", EXP, "Nízka", "", ""),
+    (L, "Hl. m. Praha", "Životné prostredie 2027 – V. špecifické projekty", "Mix (Praha: NNO, SVJ, FO)", "Grant", "Regionálne", "2 250 000 Kč", "100 %", "450 000 Kč", "2026-11-05", "", EXP, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL5-2027-01 – klíma (7 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€18 mil.", "neuvedené", "€6 mil.", "2027-03-04", "", EXP, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-WIDERA-2027-05 – európsky výskumný systém (5 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€42 mil.", "neuvedené", "€3 mil.", "2027-03-11", "", EXP, "Nízka", "", ""),
+    (L, "EK – Horizon Europe", "HORIZON-CL5-2027-02 – batérie a energetika (10 výziev)", "Konzorcium EÚ", "Grant", "Nadnárodné", "€18,8 mil.", "neuvedené", "neuvedené", "2027-03-31", "", EXP, "Nízka", "", ""),
+    (L, "MZe ČR", "9.E Školské závody", "Podniky so štatútom Školní závod", "Grant", "Celorepublikové", "neuvedené", "60 %", "500 000 Kč", "2027-04-30", "", EXP, "Nízka", "", ""),
+    (L, "OP Zaměstnanost+", "92. výzva – detské skupiny (5)", "Firmy (podnikové DS), obce, NNO", "Grant", "Celorepublikové", "300 000 000 Kč", "100 %", "7 882 992 Kč", "2027-11-30", "vyhlásenie 03/2027", EXP, "Vysoká", "Aj podnikové detské skupiny; 100 %.", ""),
+    # --- additions found on the web (not in the user's list) ---
+    (W, "OP TAK (MPO/API)", "Technologie pro MAS (CLLD) – výzva II", "MSP na území MAS (mimo Prahy a miest nad 25 tis.)", "Grant", "Regionálne (MAS)", "540 000 000 Kč", "neuvedené", "1 490 000 Kč", "2027-09-01", "príjem od 1. 9. 2026", OPEN, "Vysoká", "Podporuje aj softvér a IT infraštruktúru – ERP/Odoo.", "https://www.businessinfo.cz/clanky/op-tak-vyhlaseni-vyzvy-ii-technologie-pro-mas-clld/"),
+    (W, "Kraj Vysočina", "Podnikateľské vouchery 2026", "Firmy a OSVČ na Vysočine", "Grant", "Regionálne", "7 000 000 Kč", "neuvedené", "neuvedené", "2026-10-30", "príjem od 23. 3. 2026", OPEN, "Vysoká", "Inovácie, digitalizácia, kyberbezpečnosť.", "https://www.businessinfo.cz/clanky/kraj-vysocina-vyhlasil-podnikatelske-vouchery-2026/"),
+    (W, "IROP (MMR)", "10. výzva eGovernment a kyberbezpečnosť (SC 1.1, VRR = Praha)", "Verejná správa (Praha)", "Grant", "Regionálne", "neuvedené", "neuvedené", "neuvedené", "2026-12-31", "predĺžené z 28. 5. 2026", OPEN, "Stredná", "Overiť na irop.gov.cz.", "https://irop.gov.cz/cs/vyzvy-2021-2027"),
+    (W, "IROP (MMR)", "120. výzva Kybernetická bezpečnost II (NIS2)", "Kraje, ORP, príspevkové organizácie", "Grant", "Celorepublikové", "neuvedené", "50 % (EÚ)", "projekt min. 1 mil. Kč", "", "príjem od 30. 4. 2026; uzávierku overiť", OPEN, "Stredná", "Uzávierka nenájdená – overiť.", "https://www.dreport.cz/blog/pripravuje-se-nova-vyzva-irop-pro-kybernetickou-bezpecnost/"),
+    (W, "Modernizační fond (SFŽP)", "TRANSCom 2/2025 – bezemisná cestná nákladná doprava", "Cestní dopravcovia", "Grant", "Celorepublikové", "960 000 000 Kč", "neuvedené", "neuvedené", "2026-11-30", "príjem od 2. 2. 2026", OPEN, "Vysoká", "Výmena dieselových nákladných áut za elektrické.", "https://sfzp.gov.cz/dotace-a-pujcky/modernizacni-fond/vyzvy/"),
+    (W, "Modernizační fond (SFŽP)", "Železničná nákladná doprava – nové elektrické lokomotívy", "Železniční nákladní dopravcovia", "Grant", "Celorepublikové", "3 500 000 000 Kč", "neuvedené", "neuvedené", "2026-10-30", "príjem od 15. 12. 2025", OPEN, "Stredná", "", "https://sfzp.gov.cz/dotace-a-pujcky/modernizacni-fond/vyzvy/"),
+    (W, "Modernizační fond (SFŽP)", "RES+ 6/2025 – agrofotovoltika a úložiská", "Poľnohospodári", "Grant", "Celorepublikové", "300 000 000 Kč", "neuvedené", "neuvedené", "2027-06-30", "príjem od 15. 1. 2026", OPEN, "Vysoká", "", "https://sfzp.gov.cz/dotace-a-pujcky/modernizacni-fond/vyzvy/"),
+    (W, "Modernizační fond (SFŽP)", "TRANSGov 1/2024 (2. kolo) – osobná železničná doprava", "Dopravcovia v osobnej železničnej doprave", "Grant", "Celorepublikové", "15 000 000 000 Kč", "neuvedené", "neuvedené", "2027-03-31", "príjem od 1. 12. 2025", OPEN, "Nízka", "Veľmi úzky okruh žiadateľov.", "https://sfzp.gov.cz/dotace-a-pujcky/modernizacni-fond/vyzvy/"),
+    (W, "OP TAK / NRB", "Nové úspory energie – bezúročný úver", "Firmy", "Zvýhodnený úver", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "", "príjem obnovený od 5. 8. 2026 (sekundárny zdroj)", OPEN, "Stredná", "Overiť na nrb.cz – zdroj je sekundárny.", "https://www.energosolar.cz/dotace-fotovoltaika-v-roce-2026/"),
+    (W, "OP Spravedlivá transformace", "Transformačný úver", "Firmy (Karlovarský, Ústecký, Moravskosliezsky kraj)", "Zvýhodnený úver", "Regionálne", "neuvedené", "neuvedené", "neuvedené", "2026-12-31", "priebežne do konca 2026", OPEN, "Stredná", "", "https://opst.cz/aktualizovany-harmonogram-vyzev-opst-zkontrolujte-terminy-nektere-vyzvy-brzy-konci/"),
+    (W, "SZIF – SP SZP", "Projektové intervencie – kolo 1.–22. 10. 2026", "Poľnohospodári, spracovatelia", "Grant", "Celorepublikové", "neuvedené", "neuvedené", "neuvedené", "2026-10-22", "príjem 1.–22. 10. 2026; intervencie overiť (33.73 až jar 2027)", EXP, "Stredná", "Ktoré intervencie sú v kole – overiť na szif.gov.cz.", "https://agro-svet.cz/dotace/kalendar-kol/"),
+]
+
+REL_RANK = {"Vysoká": 0, "Stredná": 1, "Nízka": 2}
+
+
+def sort_key(item):
+    idx, row = item
+    date = dt.date.fromisoformat(row[9]) if row[9] else None
+    expired = date is not None and date < TODAY
+    return (expired, REL_RANK[row[12]], date or dt.date(2100, 1, 1), idx)
+
+
+rows = [row for _, row in sorted(enumerate(R, 1), key=sort_key)]
+ids = [idx for idx, _ in sorted(enumerate(R, 1), key=sort_key)]
+
+ARIAL = "Arial"
+HDR_FILL = PatternFill("solid", fgColor="1F3864")
+HDR_FONT = Font(name=ARIAL, bold=True, color="FFFFFF", size=10)
+BODY = Font(name=ARIAL, size=10)
+BLUE = Font(name=ARIAL, size=10, color="0000FF")
+LINK = Font(name=ARIAL, size=10, color="0563C1", underline="single")
+THIN = Side(style="thin", color="BFBFBF")
+BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+WRAP = Alignment(wrap_text=True, vertical="top")
+INPUT_FILL = PatternFill("solid", fgColor="FFFF00")
+
+wb = Workbook()
+summary = wb.active
+summary.title = "Súhrn"
+calls = wb.create_sheet("Výzvy")
+legend = wb.create_sheet("Legenda")
+DNES = "'Súhrn'!$B$3"
+
+# --- Výzvy ---------------------------------------------------------------------------------
+headers = ["ID", "Zdroj", "Poskytovateľ / program", "Výzva", "Pre koho", "Typ financovania", "Územie",
+           "Alokácia", "Max. %", "Max. dotácia", "Uzávierka", "Termín – poznámka", "Status v zdroji",
+           "Stav k dátumu", "Dní do uzávierky", "Relevancia pre poradenstvo", "Poznámka", "Overenie / zdroj"]
+widths = [5, 13, 24, 48, 30, 16, 20, 18, 11, 18, 12, 30, 13, 17, 11, 14, 44, 30]
+for col, (name, width) in enumerate(zip(headers, widths), 1):
+    cell = calls.cell(row=1, column=col, value=name)
+    cell.font, cell.fill, cell.border = HDR_FONT, HDR_FILL, BORDER
+    cell.alignment = Alignment(wrap_text=True, vertical="center")
+    calls.column_dimensions[get_column_letter(col)].width = width
+calls.row_dimensions[1].height = 32
+
+for r, (idx, row) in enumerate(zip(ids, rows), 2):
+    (src, prov, name, who, kind, area, alloc, pct, maxg, deadline, note_t, status, rel, note, verify) = row
+    values = [idx, src, prov, name, who, kind, area, alloc, pct, maxg,
+              dt.date.fromisoformat(deadline) if deadline else None, note_t or None, status]
+    for col, value in enumerate(values, 1):
+        cell = calls.cell(row=r, column=col, value=value)
+        cell.font, cell.border, cell.alignment = BODY, BORDER, WRAP
+    calls.cell(row=r, column=11).number_format = "d. m. yyyy"
+    k, m = f"K{r}", f"M{r}"
+    calls.cell(row=r, column=14, value=(
+        f'=IF({k}="",{m},IF({k}<{DNES},"Po uzávierke",IF({m}="{EXP}","{EXP}",'
+        f'IF({k}-{DNES}<=14,"Končí do 14 dní","{OPEN}"))))'))
+    calls.cell(row=r, column=15, value=f'=IF({k}="","",{k}-{DNES})')
+    calls.cell(row=r, column=15).number_format = "0"
+    for col, value in ((16, rel), (17, note or None)):
+        calls.cell(row=r, column=col, value=value)
+    if verify:
+        cell = calls.cell(row=r, column=18, value=verify)
+        cell.hyperlink, cell.font = verify, LINK
+    else:
+        calls.cell(row=r, column=18, value="tvoj zoznam")
+    for col in (14, 15, 16, 17, 18):
+        c = calls.cell(row=r, column=col)
+        c.border, c.alignment = BORDER, WRAP
+        if c.font != LINK:
+            c.font = BODY
+    if src == W:
+        calls.cell(row=r, column=2).font = Font(name=ARIAL, size=10, bold=True, color="006100")
+
+last = len(rows) + 1
+calls.freeze_panes = "E2"
+calls.auto_filter.ref = f"A1:R{last}"
+stav = f"N2:N{last}"
+calls.conditional_formatting.add(stav, FormulaRule(formula=['N2="Po uzávierke"'],
+                                                   fill=PatternFill("solid", fgColor="D9D9D9"),
+                                                   font=Font(name=ARIAL, color="7F7F7F")))
+calls.conditional_formatting.add(stav, FormulaRule(formula=['N2="Končí do 14 dní"'],
+                                                   fill=PatternFill("solid", fgColor="FFC7CE")))
+calls.conditional_formatting.add(stav, FormulaRule(formula=[f'N2="{OPEN}"'],
+                                                   fill=PatternFill("solid", fgColor="C6EFCE")))
+calls.conditional_formatting.add(stav, FormulaRule(formula=[f'N2="{EXP}"'],
+                                                   fill=PatternFill("solid", fgColor="DDEBF7")))
+calls.conditional_formatting.add(f"P2:P{last}", FormulaRule(formula=['P2="Vysoká"'],
+                                                            font=Font(name=ARIAL, bold=True, color="006100")))
+calls.conditional_formatting.add(f"A2:M{last}", FormulaRule(formula=['$N2="Po uzávierke"'],
+                                                            font=Font(name=ARIAL, color="A6A6A6")))
+dv = DataValidation(type="list", formula1='"Vysoká,Stredná,Nízka"', allow_blank=True)
+calls.add_data_validation(dv)
+dv.add(f"P2:P{last}")
+
+# --- Súhrn ---------------------------------------------------------------------------------
+summary["A1"] = "Porovnanie dotačných výziev ČR – grantové poradenstvo"
+summary["A1"].font = Font(name=ARIAL, bold=True, size=14)
+summary["A3"], summary["B3"] = "Dnes (stav sa prepočíta od tohto dátumu):", TODAY
+summary["A3"].font = Font(name=ARIAL, bold=True, size=10)
+summary["B3"].font, summary["B3"].fill, summary["B3"].number_format = BLUE, INPUT_FILL, "d. m. yyyy"
+summary["B3"].comment = Comment("Vstup: zmeň na dnešný dátum, stĺpce Stav a Dní do uzávierky sa prepočítajú.", "Apoliak7777")
+
+states = ["Po uzávierke", "Končí do 14 dní", OPEN, EXP, CONT]
+rels = ["Vysoká", "Stredná", "Nízka"]
+top = 5
+summary.cell(row=top, column=1, value="Stav \\ Relevancia")
+for j, rel in enumerate(rels + ["Spolu"], 2):
+    summary.cell(row=top, column=j, value=rel)
+for i, st in enumerate(states + ["Spolu"], top + 1):
+    summary.cell(row=i, column=1, value=st)
+    for j, rel in enumerate(rels, 2):
+        col = get_column_letter(j)
+        if st == "Spolu":
+            summary.cell(row=i, column=j, value=f"=SUM({col}{top + 1}:{col}{i - 1})")
+        else:
+            summary.cell(row=i, column=j, value=(
+                f"=COUNTIFS('Výzvy'!$N$2:$N${last},$A{i},'Výzvy'!$P$2:$P${last},{col}${top})"))
+    summary.cell(row=i, column=5, value=f"=SUM(B{i}:D{i})")
+end1 = top + len(states) + 1
+
+top2 = end1 + 2
+summary.cell(row=top2, column=1, value="Zdroj \\ Stav")
+for j, st in enumerate(states + ["Spolu"], 2):
+    summary.cell(row=top2, column=j, value=st)
+for i, src in enumerate([L, W, "Spolu"], top2 + 1):
+    summary.cell(row=i, column=1, value=src)
+    for j, st in enumerate(states, 2):
+        col = get_column_letter(j)
+        if src == "Spolu":
+            summary.cell(row=i, column=j, value=f"=SUM({col}{top2 + 1}:{col}{i - 1})")
+        else:
+            summary.cell(row=i, column=j, value=(
+                f"=COUNTIFS('Výzvy'!$B$2:$B${last},$A{i},'Výzvy'!$N$2:$N${last},{col}${top2})"))
+    summary.cell(row=i, column=len(states) + 2, value=f"=SUM(B{i}:{get_column_letter(len(states) + 1)}{i})")
+end2 = top2 + 3
+
+top3 = end2 + 2
+summary.cell(row=top3, column=1, value="Oplatí sa riešiť hneď (vysoká relevancia, ešte sa dá podať)")
+summary.cell(row=top3 + 1, column=1, value="Počet:")
+summary.cell(row=top3 + 1, column=2, value=(
+    f"=COUNTIFS('Výzvy'!$P$2:$P${last},\"Vysoká\",'Výzvy'!$N$2:$N${last},\"<>Po uzávierke\")"))
+
+for row in summary.iter_rows(min_row=top, max_row=top3 + 1):
+    for cell in row:
+        if cell.value is not None:
+            cell.font = BODY
+            if cell.row in (top, top2) or cell.column == 1:
+                cell.font = Font(name=ARIAL, bold=True, size=10)
+            if cell.row in (top, top2):
+                cell.fill = PatternFill("solid", fgColor="D9E1F2")
+            cell.border = BORDER
+summary.cell(row=top3, column=1).border = Border()
+summary.column_dimensions["A"].width = 44
+for col in "BCDEFG":
+    summary.column_dimensions[col].width = 16
+
+# --- Legenda -------------------------------------------------------------------------------
+notes = [
+    ("Čo je v zošite", ""),
+    ("Výzvy", f"{len(R)} výziev: {sum(1 for r in R if r[0] == L)} z tvojho zoznamu + "
+              f"{sum(1 for r in R if r[0] == W)} doplnkov z webu, ktoré v zozname chýbali. Zoradené: najprv tie, "
+              "na ktoré sa dá podať, podľa relevancie a uzávierky; stĺpec ID = poradie v zdroji."),
+    ("Zdroj", "„Tvoj zoznam“ = údaje prevzaté z tvojho zoznamu (neoverené proti poskytovateľom). "
+              "„Doplnok (web)“ = nájdené vyhľadávaním 25. 9. 2026; odkaz v stĺpci Overenie."),
+    ("Stav k dátumu", "Vzorec z Uzávierky a dátumu v Súhrn!B3: Po uzávierke / Končí do 14 dní / Otvorená; "
+                      "bez dátumu sa preberá Status v zdroji (Priebežná, Očakávaná)."),
+    ("Relevancia", "Môj odhad pre komerčné grantové poradenstvo v ČR: Vysoká = široký okruh klientov, "
+                   "rozumný termín a objem; Nízka = medzinárodné konzorciá, obrana, infraštruktúra, tendre, "
+                   "nadácie s malými sumami. Dá sa prepísať (rozbaľovací zoznam)."),
+    ("Sumy", "Alokácia a max. dotácia sú text tak, ako v zdroji (Kč aj €); kde mena v zdroji vyzerá chybne, "
+             "je to v poznámke."),
+    ("Upozornenia", "Stránka optak.gov.cz bola z prostredia nedostupná; doplnky OP TAK, IROP, NRB a SZIF sú "
+                    "z výsledkov vyhľadávania – pred ponukou klientovi overiť u poskytovateľa."),
+    ("Nepridané (už uzavreté)", "OP TAK Digitální podnik I (18. 2. 2026) a II (17. 4. 2026), Inovace IV "
+                                "(20. 2. 2026), Potenciál III (17. 2. 2026), NRB Expanze (pozastavené od "
+                                "10. 8. 2026), EDIH II (25. 5. 2026), TA ČR TREND podprogram 2 (v 2026 sa nevyhlási)."),
+    ("Sledovať", "Nová výzva OP TAK Úspory energie (plánovaná na 2026, termín neznámy); ďalšie kolo Digitální "
+                 "podnik (pre ERP/Odoo najdôležitejšie) – nenašiel som."),
+]
+legend.column_dimensions["A"].width = 24
+legend.column_dimensions["B"].width = 110
+for i, (key, text) in enumerate(notes, 1):
+    a, b = legend.cell(row=i, column=1, value=key), legend.cell(row=i, column=2, value=text or None)
+    a.font = Font(name=ARIAL, bold=True, size=12 if i == 1 else 10)
+    b.font, b.alignment = BODY, WRAP
+
+out = str(Path(__file__).with_name("vyzvy_CZ_porovnanie_2026-09-25.xlsx"))
+wb.properties.creator = "Apoliak7777"
+wb.properties.title = "Porovnanie dotačných výziev ČR"
+wb.save(out)
+print(out, len(R), "rows")

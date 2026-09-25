@@ -36,5 +36,8 @@ path = "src/sevlint/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sevlint"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["dotacie"]  # grant-call comparison, not part of the package
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

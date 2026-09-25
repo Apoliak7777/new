@@ -280,6 +280,10 @@ the project config is ignored (with a note).
 * Which Python Odoo Online (SaaS) runs is not published; pick the closest `target-python`.
 * The W rules are heuristics.
 
+## Also in this repository
+
+[`dotacie/`](dotacie/): a comparison of Czech grant calls for grant consulting (in Slovak), unrelated to the linter.
+
 ## License
 
 LGPL-3.0 (like Odoo; `tests/fixtures/odoo/*/safe_eval.py` are copied from Odoo S.A.'s repository).
